@@ -1,6 +1,6 @@
 # 기초부터 이해하기 — object_detect 입문 가이드
 
-> [README.md](README.md) 가 "**무엇을 만들었나**" 라면, 이 문서는 "**이게 다 무슨 소리냐**" 를 다룬다.
+> [MOTION_DETECT.md](MOTION_DETECT.md) 가 "**무엇을 만들었나**" 라면, 이 문서는 "**이게 다 무슨 소리냐**" 를 다룬다.
 > 사전지식 없이 읽을 수 있게 썼다. 용어가 나오면 바로 그 자리에서 설명한다.
 
 ---
@@ -568,7 +568,7 @@ http://192.168.0.5/stw-cgi/...  ← 카메라 CGI
 
 ```
 object_detect/
-├── README.md                 ← 무엇을 만들었나 (기술 문서)
+├── MOTION_DETECT.md                 ← 무엇을 만들었나 (기술 문서)
 ├── BASICS.md                 ← 이 파일 (입문 가이드)
 ├── docker-compose.yml        ← 빌드 명령 모음
 ├── config/
@@ -638,4 +638,4 @@ ProcessAEvent()         모든 쪽지의 입구 — 종류 보고 분배
 
 ---
 
-다음: [README.md](README.md) — 실제 구현 상세와 트러블슈팅 전체 기록
+다음: [MOTION_DETECT.md](MOTION_DETECT.md) — 실제 구현 상세와 트러블슈팅 전체 기록

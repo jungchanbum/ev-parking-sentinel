@@ -3,7 +3,7 @@
 > `opensdk_new_project` 로 갓 만든 **빈 껍데기 앱**을 지금의 object_detect(움직임 감지 + 웹 오버레이 + 라이브 영상 + 차량 + DEBUG VIEWER)까지 만드는 전 과정.
 > **바꿀 파일만** 다룬다. 안 건드리는 파일은 아예 안 나온다.
 >
-> 용어가 어려우면 → [BASICS.md](BASICS.md) / 데이터 흐름 → [DATAFLOW.md](DATAFLOW.md) / 구현 상세 → [README.md](README.md)
+> 용어가 어려우면 → [BASICS.md](BASICS.md) / 데이터 흐름 → [DATAFLOW.md](DATAFLOW.md) / 구현 상세 → [MOTION_DETECT.md](MOTION_DETECT.md)
 
 ---
 

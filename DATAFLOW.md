@@ -659,4 +659,4 @@ latest_[ch].swap(dets);   // 이번 프레임 결과로 통째 교체
 
 ---
 
-관련 문서: [BASICS.md](BASICS.md) (용어·개념) · [README.md](README.md) (구현 상세) · [FROM_SCRATCH.md](FROM_SCRATCH.md) (직접 만들기)
+관련 문서: [BASICS.md](BASICS.md) (용어·개념) · [MOTION_DETECT.md](MOTION_DETECT.md) (구현 상세) · [FROM_SCRATCH.md](FROM_SCRATCH.md) (직접 만들기)
