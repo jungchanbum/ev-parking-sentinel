@@ -772,7 +772,7 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   // ---- 번호판: 감지 알림 + 저장(PlateStore) + 박스 표시 ----
   for (auto& p : plates) {
     bool is_new = plate_seen_[ch].find(p.id) == plate_seen_[ch].end();
-    plate_seen_[ch][p.id] = tick;
+    plate_seen_[ch][p.id] = {tick, now_ms};
     if (is_new) {  // 새 번호판 등장 순간에만 알림 1번 + 진단 카운트
       plates_seen_++;
       if (!p.imgref.empty()) { imgref_seen_++; imgref_ch_[ch]++; }
@@ -802,15 +802,24 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
 
   latest_[ch].swap(dets);  // 웹 오버레이가 읽어감 (움직이는 객체 + 그 번호판)
 
-  // 오래 안 보인 번호판 id 정리 (감지 알림 중복방지 맵)
-  //   [②버스트 승격] 추적 종료 → 신뢰도 챔피언십으로 최종 확정
-  //   (good-shot/버스트 무관, 유효포맷 중 conf 최고가 승리 — Q45 우회 크롭의 역전 허용)
+  // 오래 안 보인 번호판 확정 — 전 채널을 훑는다. 영상이 끝난 채널은 메타데이터가
+  // 끊겨 자기 tick 이 못 굴러가므로, 살아있는 다른 채널의 프레임이 시계를 대신 돌려준다.
+  for (int c = 0; c < cfg::kChannels; ++c) FinalizeStalePlates(c, now_ms);
+  motion_[ch].PruneStale(tick);  // 오래 안 보인 객체 추적 제거
+}
+
+// 만료된 번호판을 신뢰도 챔피언십으로 최종 확정한다 (FINAL/HOLD).
+//   [②버스트 승격] good-shot/버스트 무관, 유효포맷 중 conf 최고가 승리 (Q45 우회 크롭의 역전 허용)
+//   만료 = 그 채널 프레임 기준(kStaleFrames) OR 벽시계 기준(kStaleMs) — 채널이 조용해져도 확정됨.
+void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
+  uint64_t tick = tick_[ch];
   for (auto it = plate_seen_[ch].begin(); it != plate_seen_[ch].end();) {
     // good-shot 크롭은 최대 3초 늦게 써짐(RetryPending) → primary 샘플이 아직 없으면
     // stale 유예를 3배로 늘려 기다린다 (버스트 환각만으로 조기 오답 FINAL 방지, id9595 실측)
-    uint64_t grace = plate_vote_.HasPrimary(ch, it->first)
-                         ? cfg::kStaleFrames : cfg::kStaleFrames * 3;
-    if (it->second + grace < tick) {
+    bool has_primary = plate_vote_.HasPrimary(ch, it->first);
+    uint64_t grace    = has_primary ? cfg::kStaleFrames : cfg::kStaleFrames * 3;
+    uint64_t grace_ms = has_primary ? cfg::kStaleMs : cfg::kStaleMs * 3;
+    if (it->second.tick + grace < tick || it->second.ms + grace_ms < now_ms) {
       // [스태킹] 확정 직전, 이 차의 버스트 평균본(노이즈 √N 상쇄)으로 마지막 1표 시도
       auto sa = stack_acc_[ch].find(it->first);
       if (sa != stack_acc_[ch].end()) {
@@ -849,7 +858,6 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
       ++it;
     }
   }
-  motion_[ch].PruneStale(tick);  // 오래 안 보인 객체 추적 제거
 }
 
 extern "C" {

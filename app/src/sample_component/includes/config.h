@@ -106,5 +106,9 @@ constexpr int kCompareBack = 5;           // 몇 프레임 전 좌표와 비교�
 constexpr double kMoveRatio = 0.03;       // 이동 > 좌표스케일*3% 이면 "움직임"
 constexpr uint64_t kMovingHoldMs = 3000;  // 움직임 감지 후 이 시간(ms) 동안 moving 유지
 constexpr uint64_t kStaleFrames = 15;     // 이 프레임 이상 안 보이면 추적 삭제
+// 번호판 확정 만료의 벽시계 백업(ms). 영상이 끝나 그 채널 메타데이터가 끊기면
+// 프레임 카운터(tick)가 멈춰 위 조건이 영원히 안 참 → 마지막 차가 팬딩에 갇힘.
+// 어느 채널 프레임에서든 전 채널을 벽시계로도 점검한다 (primary 없으면 ×3 유예).
+constexpr uint64_t kStaleMs = 3000;
 
 }  // namespace cfg

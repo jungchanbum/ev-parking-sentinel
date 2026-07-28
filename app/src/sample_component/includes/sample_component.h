@@ -82,7 +82,12 @@ class SampleComponent : public Component, public ISampleComponent {
   std::string last_xml_[4];        // [진단] 채널별 마지막 차량 객체 프레임 XML (fallback)
   std::string last_plate_xml_[4];  // [진단] 채널별 마지막 "번호판 든 객체 프레임" XML (우선)
   std::string raw_events_[4];      // [진단] 채널별 누적 이벤트 알림(중복제거) → /rawevents
-  std::map<long, uint64_t> plate_seen_[4];  // 번호판 id → 마지막 tick (감지 알림 중복방지)
+  // 번호판 id → 마지막 목격 (tick=그 채널 프레임 수, ms=벽시계).
+  //   만료는 둘 중 하나로 판정 — 영상이 끝나 채널 메타데이터가 끊기면 tick 이 멈추므로
+  //   벽시계가 없으면 마지막 차가 영원히 팬딩으로 남는다 (2026-07-28 실측).
+  struct PlateSeen { uint64_t tick = 0; uint64_t ms = 0; };
+  std::map<long, PlateSeen> plate_seen_[4];
+  void FinalizeStalePlates(int ch, uint64_t now_ms);  // 만료 번호판 확정 (전 채널 대상 호출)
 
   uint64_t tick_[4] = {0, 0, 0, 0};               // 채널별 프레임 카운터
   bool meta_diag_done_[4] = {false, false, false, false};  // 첫 진단 로그 여부
