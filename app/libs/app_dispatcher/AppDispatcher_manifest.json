@@ -1,0 +1,5 @@
+{
+	"LibraryFileName" : "libapp_dispatcher_model.so",
+	"Version" : "1.0.0",
+	"DynamicLoadable" : true
+}

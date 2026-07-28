@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>object_detect · Sharpness Verify</title>
+<style>
+  :root{
+    --bg:#0a0e17; --panel:#121826; --line:#1f2a3d; --txt:#e6edf7; --dim:#7c8aa5;
+    --accent:#22d3ee; --win:#31e281; --drop:#ff3b5c; --amber:#f5b301;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#16203a 0%,var(--bg) 60%);
+       color:var(--txt);font-family:"Segoe UI",system-ui,-apple-system,sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:18px}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  header .logo{width:38px;height:38px;border-radius:10px;
+    background:linear-gradient(135deg,var(--accent),#6366f1);display:grid;place-items:center;
+    font-size:20px;box-shadow:0 0 24px rgba(34,211,238,.45)}
+  header h1{font-size:19px;margin:0;letter-spacing:.3px}
+  header .sub{color:var(--dim);font-size:12px}
+  .bar{display:flex;gap:10px;align-items:center;margin:12px 0;flex-wrap:wrap}
+  .bar button{padding:8px 16px;border-radius:999px;border:1px solid var(--line);
+    background:var(--panel);color:var(--txt);cursor:pointer;font-weight:700;font-size:13px}
+  .bar button:hover{border-color:var(--accent)}
+  .bar .stat{color:var(--dim);font-size:12px}
+  .bar .stat b{color:var(--accent)}
+  .car{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:14px;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .car h2{margin:0 0 4px;font-size:15px;letter-spacing:.2px}
+  .car h2 .oid{color:var(--accent)}
+  .car .meta{color:var(--dim);font-size:12px;margin-bottom:12px}
+  .car .meta .best{color:var(--win);font-weight:700}
+  .car.single{border-color:var(--amber)}
+  .car.single .warn{color:var(--amber);font-size:12px;font-weight:700}
+  .shots{display:flex;gap:12px;flex-wrap:wrap}
+  .shot{width:190px;border:2px solid var(--line);border-radius:10px;overflow:hidden;
+    background:#05080e;position:relative;transition:.15s}
+  .shot.win{border-color:var(--win);box-shadow:0 0 18px rgba(49,226,129,.35)}
+  .shot.drop{opacity:.5}
+  .shot img{display:block;width:100%;height:120px;object-fit:contain;background:#05080e}
+  .shot .cap{display:flex;justify-content:space-between;align-items:center;
+    padding:7px 10px;font-size:12px;font-weight:700}
+  .shot .cap .sc{color:var(--txt)}
+  .shot.win .cap .sc{color:var(--win)}
+  .badge{position:absolute;top:8px;left:8px;font-size:10px;font-weight:800;letter-spacing:.5px;
+    padding:3px 7px;border-radius:6px;background:rgba(6,12,22,.8);border:1px solid var(--line)}
+  .badge.win{color:#04121a;background:var(--win);border-color:transparent}
+  .badge.drop{color:var(--drop)}
+  .after{display:flex;gap:12px;align-items:center;margin-top:12px;padding-top:12px;
+    border-top:1px dashed var(--line)}
+  .after .lbl{color:var(--dim);font-size:12px;font-weight:700}
+  .after .pair{display:flex;gap:10px}
+  .after figure{margin:0;width:190px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#05080e}
+  .after figure img{display:block;width:100%;height:120px;object-fit:contain;background:#05080e}
+  .after figure figcaption{padding:6px 10px;font-size:11px;color:var(--dim);font-weight:700}
+  .after figure.on{border-color:var(--win)}
+  .after figure.on figcaption{color:var(--win)}
+  .empty{color:var(--dim);text-align:center;padding:60px 20px;font-size:14px}
+  .foot{color:var(--dim);font-size:11px;margin-top:10px;line-height:1.7}
+  .foot code{background:#0d1420;border:1px solid var(--line);border-radius:4px;padding:1px 6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🔬</div>
+    <div>
+      <h1>Sharpness Verify · best-shot selection</h1>
+      <div class="sub">Per vehicle: all candidate crops the camera sent, ranked by Laplacian sharpness. Winner = saved.</div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <button id="refresh">↻ Refresh</button>
+    <button id="auto">Auto: ON</button>
+    <span class="stat">cars <b id="nCars">0</b> · candidates <b id="nCand">0</b> · multi-shot cars <b id="nMulti">0</b></span>
+  </div>
+
+  <div id="list"></div>
+
+  <div class="foot">
+    Badge <b style="color:var(--win)">WINNER</b> = highest sharpness (this crop is saved). <b style="color:var(--drop)">dropped</b> = blurrier, discarded.
+    A car outlined in <b style="color:var(--amber)">amber</b> sent only <b>one</b> crop → nothing to compare (best-shot had no choice).<br/>
+    Decision codes from the log: <code>N</code> first save · <code>R</code> replaced (sharper) · <code>K</code> kept existing (candidate blurrier) · <code>D</code> dropped (below sharpness floor — trash).
+    This view is heavy (dumps every crop). Turn off by setting <code>cfg::kDebugCandidates=false</code> and rebuilding.
+  </div>
+</div>
+
+<script>
+  const app_id = window.location.pathname.split('/')[5];
+  const base = `${location.protocol}//${location.hostname}:${location.port}/opensdk/${app_id}`;
+  const list = document.getElementById('list');
+  let auto = true, timer = null;
+
+  function groupByCar(recs){
+    // key = ch:oid, preserve first-seen order
+    const map = new Map();
+    for(const r of recs){
+      const k = r.ch + ':' + r.oid;
+      if(!map.has(k)) map.set(k, []);
+      map.get(k).push(r);
+    }
+    return map;
+  }
+
+  async function load(){
+    let recs = [];
+    try{
+      const res = await fetch(`${base}/candlist`, {cache:'no-store'});
+      recs = await res.json();
+    }catch(e){
+      list.innerHTML = `<div class="empty">Could not reach ${base}/candlist<br/>${e}</div>`;
+      return;
+    }
+    if(!recs.length){
+      list.innerHTML = `<div class="empty">No candidates yet. Drive a vehicle past the camera, then Refresh.</div>`;
+      document.getElementById('nCars').textContent='0';
+      document.getElementById('nCand').textContent='0';
+      document.getElementById('nMulti').textContent='0';
+      return;
+    }
+    const groups = groupByCar(recs);
+    // newest car first
+    const cars = [...groups.entries()].reverse();
+    let multi = 0;
+    let html = '';
+    for(const [key, shots] of cars){
+      const [ch, oid] = key.split(':');
+      const saved = shots.filter(s=>s.d==='N'||s.d==='R');   // 실제 디스크에 저장된 것
+      const bestSaved = saved.length ? Math.max(...saved.map(s=>s.score)) : null;
+      const single = shots.length === 1;
+      if(!single) multi++;
+      html += `<div class="car ${single?'single':''}">`;
+      html += `<h2>ch${ch} · vehicle <span class="oid">oid ${oid}</span></h2>`;
+      html += `<div class="meta">compared <b>${shots.length}</b> shot(s) · `;
+      html += bestSaved!==null
+        ? `winner sharpness <span class="best">${bestSaved.toFixed(0)}</span>`
+        : `<span class="warn">all crops below floor — nothing saved (trash)</span>`;
+      if(single) html += ` &nbsp; <span class="warn">⚠ single crop — no comparison possible</span>`;
+      html += `</div><div class="shots">`;
+      // newest shot first within a car
+      for(const s of [...shots].reverse()){
+        const isWin = (s.d==='N'||s.d==='R') && s.score === bestSaved;
+        const isTrash = s.d==='D';
+        const cls = isWin ? 'win' : 'drop';
+        let badge;
+        if(isWin) badge = `<span class="badge win">WINNER</span>`;
+        else if(isTrash) badge = `<span class="badge drop">TRASH</span>`;
+        else badge = `<span class="badge drop">dropped</span>`;
+        const url = `${base}/cand?n=${s.file}&t=${s.seq}`;
+        html += `<div class="shot ${cls}">${badge}`
+             +  `<img src="${url}" alt="cand ${s.file}"/>`
+             +  `<div class="cap"><span>#${s.file} · ${s.d}</span><span class="sc">${s.score.toFixed(0)}</span></div>`
+             +  `</div>`;
+      }
+      html += `</div>`;
+      // before/after: raw WiseAI crop vs enhanced saved (unsharp)
+      const winShot = saved.find(s=>s.score===bestSaved);
+      if(winShot){
+        const rawU  = `${base}/cand?n=${winShot.file}&t=${winShot.seq}`;
+        const savedU= `${base}/plate?n=${winShot.slot}&t=${winShot.seq}`;
+        html += `<div class="after"><span class="lbl">before → after</span><div class="pair">`
+             +  `<figure><img src="${rawU}"/><figcaption>raw (WiseAI crop)</figcaption></figure>`
+             +  `<figure class="on"><img src="${savedU}"/><figcaption>saved · unsharp enhanced</figcaption></figure>`
+             +  `</div></div>`;
+      }
+      html += `</div>`;
+    }
+    list.innerHTML = html;
+    document.getElementById('nCars').textContent = groups.size;
+    document.getElementById('nCand').textContent = recs.length;
+    document.getElementById('nMulti').textContent = multi;
+  }
+
+  document.getElementById('refresh').onclick = load;
+  document.getElementById('auto').onclick = (e)=>{
+    auto = !auto;
+    e.target.textContent = 'Auto: ' + (auto?'ON':'OFF');
+    if(auto){ timer = setInterval(load, 3000); } else { clearInterval(timer); }
+  };
+  load();
+  timer = setInterval(load, 3000);
+</script>
+</body>
+</html>

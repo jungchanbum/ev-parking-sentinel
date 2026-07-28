@@ -1,0 +1,28 @@
+{
+  "LibraryFileName": "libsample_component.so",
+  "Instance": {
+    "InstanceName": "SampleComponent",
+    "SchedulerName": "SampleComponentScheduler",
+    "ReceiverNames": [
+      "AppDispatcher",
+      "OpenPlatform"
+    ],
+    "SourceNames": [
+      {
+        "Source": "MetadataManager_{Ch}",
+        "GroupName": "Metadata::OpenApp"
+      },
+      {
+        "Source": "OpenPlatform",
+        "GroupName": "AppMessage"
+      },
+      {
+        "Source": "2009002",
+        "GroupName": "AppInfo"
+      }
+    ],
+    "Channel": "System",
+    "ModelPath": "../res/models/",
+    "SettingPath": "../storage/settings/"
+  }
+}

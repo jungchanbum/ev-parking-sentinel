@@ -1,0 +1,4 @@
+# 빌드 중간산출물 (docker compose 빌드로 재생성됨)
+app/build/
+app/bin/
+app/storage/

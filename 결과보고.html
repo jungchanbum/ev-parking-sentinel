@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>object_detect · 결과 보고</title>
+<style>
+  :root{
+    --ink:#0b0f16; --panel:#131a24; --panel2:#0f151d; --line:#243043;
+    --text:#e7edf6; --dim:#8ea0b8; --faint:#5d6b80;
+    --sig:#2fd4e6; --plate:#38e08a; --alert:#ff5a72;
+    --sans: system-ui,-apple-system,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;
+    --mono: ui-monospace,"Cascadia Code","Consolas",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:clamp(22px,5vw,52px) clamp(16px,4vw,32px)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--sig);margin:0 0 10px}
+  h1{font-size:clamp(28px,5.5vw,44px);line-height:1.08;margin:0 0 12px;font-weight:800;letter-spacing:-.02em}
+  .lead{font-size:clamp(15px,2vw,18px);color:var(--dim);max-width:60ch;margin:0}
+  .top{display:flex;justify-content:space-between;gap:12px;font-family:var(--mono);font-size:12px;color:var(--faint);margin-bottom:30px;flex-wrap:wrap}
+  section{margin-top:clamp(34px,6vw,58px)}
+  .head{display:flex;align-items:center;gap:14px;margin-bottom:8px}
+  .num{font-family:var(--mono);font-weight:800;font-size:16px;color:var(--ink);background:var(--sig);width:38px;height:38px;border-radius:10px;display:grid;place-items:center;flex:none}
+  .head.p2 .num{background:var(--plate)}
+  h2{font-size:clamp(20px,3vw,27px);margin:0;font-weight:750;letter-spacing:-.01em}
+  .sub{color:var(--dim);font-size:14.5px;margin:2px 0 20px 52px}
+  .sub b{color:var(--text)}
+  .figs{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}
+  @media(max-width:720px){.g2{grid-template-columns:1fr}}
+  figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .imgbox{position:relative;background:var(--panel2);min-height:180px;display:grid;place-items:center}
+  figure img{display:block;width:100%;height:auto}
+  .imgbox.missing::after{content:"이미지를 저장하세요 ↓ (아래 파일명)";color:var(--faint);font-family:var(--mono);font-size:12px;padding:40px 16px;text-align:center}
+  figcaption{padding:12px 15px;font-size:13.5px;color:var(--dim);border-top:1px solid var(--line)}
+  figcaption b{color:var(--text)}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:6px;margin-right:6px;vertical-align:middle}
+  .tag.red{background:color-mix(in srgb,var(--alert) 20%,transparent);color:var(--alert)}
+  .tag.grn{background:color-mix(in srgb,var(--plate) 20%,transparent);color:var(--plate)}
+  .tag.cy{background:color-mix(in srgb,var(--sig) 18%,transparent);color:var(--sig)}
+  .points{list-style:none;margin:16px 0 0 52px;padding:0;display:grid;gap:9px}
+  .points li{padding-left:22px;position:relative;font-size:14.5px;color:var(--dim)}
+  .points li b{color:var(--text)}
+  .points li::before{content:"▸";position:absolute;left:2px;color:var(--sig)}
+  .head.p2 ~ .points li::before{color:var(--plate)}
+  .fn{font-family:var(--mono);font-size:11.5px;color:var(--faint);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 7px}
+  footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--faint);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <span>OBJECT_DETECT · 결과 보고</span>
+    <span>Hanwha OpenSDK · cv5 · 온디바이스(edge)</span>
+  </div>
+
+  <p class="eyebrow">RESULTS</p>
+  <h1>카메라 안에서 돌린<br>감지 결과</h1>
+  <p class="lead">서버 없이 카메라 자체(edge)가 돌린 두 기능의 실측 결과. ① 움직이는 물체만 이벤트로 잡기 ② 움직이는 번호판 1개를 감지해 여러 순간 중 <b style="color:var(--text)">최적의 한 장</b>만 저장.</p>
+
+  <!-- ===== 1 ===== -->
+  <section>
+    <div class="head">
+      <span class="num">1</span>
+      <h2>움직이는 물체만 이벤트로 감지</h2>
+    </div>
+    <p class="sub">가만히 있는 것은 무시. <b>움직이는 대상에만</b> <span class="tag red">RED BOX</span> 이벤트가 붙는다.</p>
+
+    <div class="figs g2">
+      <figure>
+        <div class="imgbox missing"><img src="r1_a.png" alt="움직이는 사람 감지 프레임 A" onload="this.parentNode.classList.remove('missing')"></div>
+        <figcaption><span class="tag red">감지</span><b>왼쪽 사람 = 움직임</b> → 빨간 박스 이벤트 발생</figcaption>
+      </figure>
+      <figure>
+        <div class="imgbox missing"><img src="r1_b.png" alt="움직이는 사람 감지 프레임 B" onload="this.parentNode.classList.remove('missing')"></div>
+        <figcaption><b>오른쪽 사람 = 정지</b> → 박스 없음 (이벤트 안 남)</figcaption>
+      </figure>
+    </div>
+
+    <ul class="points">
+      <li>궤적 6프레임 추적 → 5프레임 전과 거리 <b>&gt; 3%</b>면 "움직임" 판정</li>
+      <li>한 번 움직이면 <b>3초 홀드</b> — 잠깐 멈춰도 이벤트가 안 끊김</li>
+      <li>같은 장면에 사람이 둘이어도 <b>움직이는 쪽만</b> 골라낸다</li>
+    </ul>
+  </section>
+
+  <!-- ===== 2 ===== -->
+  <section>
+    <div class="head p2">
+      <span class="num">2</span>
+      <h2>움직이는 번호판 → 최적 1장만 저장</h2>
+    </div>
+    <p class="sub">한 대가 지나가는 <b>여러 프레임 중 제일 잘 찍힌 순간</b>을 골라 <span class="tag grn">1대 = 1장</span> 저장.</p>
+
+    <div class="figs">
+      <figure>
+        <div class="imgbox missing"><img src="r2_live.png" alt="라이브 감지 — 움직이는 차 빨강, 번호판 초록" onload="this.parentNode.classList.remove('missing')"></div>
+        <figcaption><span class="tag red">차량</span><span class="tag grn">번호판</span>움직이는 차는 빨강, 그 안의 <b>번호판 크롭은 초록</b>으로 실시간 표시</figcaption>
+      </figure>
+      <figure>
+        <div class="imgbox missing"><img src="r2_gallery.png" alt="저장된 번호판 갤러리" onload="this.parentNode.classList.remove('missing')"></div>
+        <figcaption><span class="tag cy">저장분</span>지나간 차마다 <b>최적 크롭 1장</b>씩 — 검증용 갤러리로 누적</figcaption>
+      </figure>
+    </div>
+
+    <ul class="points">
+      <li>카메라 <b>good-shot 엔진</b>이 접근하는 차의 최선 순간을 스스로 선택·갱신</li>
+      <li>같은 객체 id의 갱신은 <b>같은 슬롯에 덮어써</b> 중복 없이 차 1대=1장</li>
+      <li>디코드·재인코드 없이 <b>원본 크롭을 그대로 저장</b> → 초경량·딜레이 0</li>
+      <li>"여러 장 중 최적을 얻는 것"도 스킬 — 그 판단을 <b>카메라가 대신</b>해 준다</li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>edge app · 카메라 내부 실행</span>
+    <span>무거운 연산은 카메라 · 우리 앱은 받아서 저장</span>
+  </footer>
+</div>
+</body>
+</html>

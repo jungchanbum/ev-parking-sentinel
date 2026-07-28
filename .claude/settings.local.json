@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:\\\\Users\\\\3-28\\\\Desktop\\\\rtsp\\\\sdk\\\\object_detect\" && find / -name \"i_p_metadata_manager.h\" 2>/dev/null | head; echo \"---\"; find / -name \"*.h\" -path \"*metadata*\" 2>/dev/null | head)"
+    ]
+  }
+}
