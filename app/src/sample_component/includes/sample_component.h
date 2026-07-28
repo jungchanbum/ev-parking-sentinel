@@ -4,6 +4,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,6 +89,8 @@ class SampleComponent : public Component, public ISampleComponent {
   struct PlateSeen { uint64_t tick = 0; uint64_t ms = 0; };
   std::map<long, PlateSeen> plate_seen_[4];
   void FinalizeStalePlates(int ch, uint64_t now_ms);  // 만료 번호판 확정 (전 채널 대상 호출)
+  // 즉시확정(good-shot 1.00)된 차 — 이후 버스트/재판독/개표를 전부 건너뛴다.
+  std::set<long> plate_done_[4];
 
   uint64_t tick_[4] = {0, 0, 0, 0};               // 채널별 프레임 카운터
   bool meta_diag_done_[4] = {false, false, false, false};  // 첫 진단 로그 여부

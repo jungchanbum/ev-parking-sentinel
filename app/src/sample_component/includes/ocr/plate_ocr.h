@@ -37,12 +37,16 @@ struct PlateOcrResult {
 class PlateOcr {
  public:
   bool Load(const std::string& kr_model, const std::string& kr_labels) {
-    if (!kr_.Load(kr_model)) return false;
+    // 스레드 수는 config 참고 — 2 는 스레드풀 스핀이 2코어를 독점해 앱 동결(실측).
+    if (!kr_.Load(kr_model, cfg::kTfliteThreads)) return false;
     kr_chars_ = plate_decode::LoadChars(kr_labels);
     return !kr_chars_.empty();
   }
 
-  PlateOcrResult Recognize(const cv::Mat& crop_bgr_or_gray) {
+  // light=true: 버스트용 경량 파이프라인 — 후보 3개(원본+밝은박스1+중앙1), 지터·조도·
+  //   구조대 전부 생략. 버스트는 "참고 표"라 풀코스가 과했음(부하 다이어트 2026-07-28).
+  //   good-shot(본선수)은 항상 풀코스(light=false).
+  PlateOcrResult Recognize(const cv::Mat& crop_bgr_or_gray, bool light = false) {
     using clk = std::chrono::steady_clock;
     auto ms_since = [](clk::time_point t0) {
       return std::chrono::duration<double, std::milli>(clk::now() - t0).count();
@@ -66,7 +70,7 @@ class PlateOcr {
     };
 
     // ---- 후보 크롭 전수 OCR(tinyLPR) → 유효(포맷+색) > 신뢰도 로 최고 후보 선택 ----
-    std::vector<cv::Mat> cands = MakeCandidates(gray);
+    std::vector<cv::Mat> cands = MakeCandidates(gray, light);
     r.cand_total = (int)cands.size();
     cv::Mat best_crop = gray;
     std::string best_txt; double best_conf = -1.0; bool best_valid = false;
@@ -92,7 +96,7 @@ class PlateOcr {
     // 봉합(2026-07-28): 원판독이 게이트를 넘는(=FINAL 자격) 경우엔 절대 개입 금지.
     //   지터가 정답 0.96 을 오답 0.94(캡)로 바꿔치기해 FINAL→오답 HOLD 로 만든 사고 실측
     //   (15노1199→15누1199, 25노5701→25누6701). 가공은 어차피 HOLD 인 판만 만진다.
-    if (cfg::kJitterEnsemble && r.confidence < cfg::kFinalConfFloor && best_crop.cols > 32) {
+    if (!light && cfg::kJitterEnsemble && r.confidence < cfg::kFinalConfFloor && best_crop.cols > 32) {
       static const double J[5][2] = {{-3, 0}, {3, 0}, {0, -2}, {0, 2}, {0, 0}};  // 마지막=스케일
       for (int j = 0; j < 5; j++) {
         cv::Mat moved;
@@ -122,7 +126,7 @@ class PlateOcr {
     // ---- 2단계a: 조도 정규화 — 평균 밝기가 비정상이면 감마로 128 에 맞춰 재판독 ----
     //   쌍라이트에 속은 AE(어두운 번호판)·반사 과노출 대응. LUT 라 ~1ms.
     r.crop_lum = cv::mean(best_crop)[0];
-    if (cfg::kExposureNorm && r.confidence < cfg::kFinalConfFloor &&
+    if (!light && cfg::kExposureNorm && r.confidence < cfg::kFinalConfFloor &&
         (r.crop_lum < cfg::kExposureLow || r.crop_lum > cfg::kExposureHigh)) {
       double m = std::min(std::max(r.crop_lum / 255.0, 0.02), 0.98);
       double g = std::log(128.0 / 255.0) / std::log(m);   // 평균이 128 로 가는 감마
@@ -148,7 +152,7 @@ class PlateOcr {
     // ---- 2단계b: 구조 체인 (conf<0.90 일 때만, 전부 conf 0.95 캡) ----
     //   보정 결과는 원본보다 신뢰할 수 없음 → 챔피언십엔 참가하되 단독으로는
     //   FINAL 게이트(0.96)를 못 넘게 한다 (오답 승격 실측: 09저2643·42주8120 사건).
-    if (r.confidence < 0.90) {
+    if (!light && r.confidence < 0.90) {
       t0 = clk::now();
       auto try_rescue = [&](const cv::Mat& img, const char* tag) {
         std::string t2; double c2;
@@ -228,7 +232,8 @@ class PlateOcr {
 
   // ---- 후보 크롭 생성 (candidates_test.py 와 동일 파라미터) ----
   //   ①원본  ②밝은영역 박스 top2 × 마진 2종  ③중앙크롭 3종  = 최대 8개
-  static std::vector<cv::Mat> MakeCandidates(const cv::Mat& gray) {
+  // light: 후보를 3개로 압축 (원본 + 밝은박스 top1×타이트마진 + 중앙 1종) — 버스트용
+  static std::vector<cv::Mat> MakeCandidates(const cv::Mat& gray, bool light = false) {
     std::vector<cv::Mat> out;
     out.push_back(gray);
 
@@ -252,9 +257,12 @@ class PlateOcr {
     std::sort(boxes.begin(), boxes.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
     const double margins[2][2] = {{0.06, 0.15}, {0.14, 0.35}};  // (가로, 세로) 마진 비율
-    for (size_t i = 0; i < boxes.size() && i < 2; i++) {
+    const size_t max_boxes = light ? 1 : 2;
+    const size_t max_margins = light ? 1 : 2;
+    for (size_t i = 0; i < boxes.size() && i < max_boxes; i++) {
       const cv::Rect& b = boxes[i].second;
-      for (const auto& m : margins) {
+      for (size_t mi = 0; mi < max_margins; mi++) {
+        const double* m = margins[mi];
         int mx = (int)(b.width * m[0]), my = (int)(b.height * m[1]);
         cv::Rect rc(std::max(0, b.x - mx), std::max(0, b.y - my), 0, 0);
         rc.width = std::min(W, b.x + b.width + mx) - rc.x;
@@ -263,10 +271,11 @@ class PlateOcr {
       }
     }
 
-    // 중앙크롭 (번호판이 크롭 중앙에 있는 경향)
+    // 중앙크롭 (번호판이 크롭 중앙에 있는 경향) — light 는 1종만
     const double centers[3][2] = {{0.7, 0.45}, {0.55, 0.35}, {0.85, 0.6}};
-    for (const auto& c : centers) {
-      int cw = (int)(W * c[0]), ch = (int)(H * c[1]);
+    const size_t max_centers = light ? 1 : 3;
+    for (size_t ci = 0; ci < max_centers; ci++) {
+      int cw = (int)(W * centers[ci][0]), ch = (int)(H * centers[ci][1]);
       if (cw >= 16 && ch >= 8)
         out.push_back(gray(cv::Rect((W - cw) / 2, (H - ch) / 2, cw, ch)));
     }

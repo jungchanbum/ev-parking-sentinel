@@ -139,6 +139,8 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     return;
   }
   if (ch < 0 || ch >= cfg::kChannels || slot < 0) return;
+  // 이미 즉시확정된 차의 늦은 good-shot(재저장) — 판독 불필요 (이중판정 방지)
+  if (plate_done_[ch].count(plate_store_.last_oid(ch))) return;
 
   char path[64];
   snprintf(path, sizeof(path), "%s/cap_%d.jpg", cfg::kStorageDir, slot);
@@ -201,8 +203,23 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
   //   물렁한(sharp<50) good-shot 이 선명한 버스트를 가중으로 누르는 사고 방지.
   long oid = plate_store_.last_oid(ch);
   if (oid != 0 && plate_decode::ValidPlateFormat(r.text)) {
-    plate_vote_.Add(ch, oid, r.text, r.confidence,
-                    /*primary=*/sharp >= cfg::kGoodshotSharpMin);
+    // ★ 즉시확정: good-shot 원본 판독 1.00 은 전 로그에서 틀린 적 0회 → 개표 생략.
+    //   (가공 결과는 캡 0.94 라 여기 못 옴 — 원본만 자격.) 이후 이 차의 버스트·
+    //   재판독·개표는 plate_done_ 으로 전부 차단 (CPU 절약 + 이중판정 방지).
+    if (r.confidence >= cfg::kInstantFinalConf) {
+      last_final_[ch] = r.text;
+      plate_done_[ch].insert(oid);
+      int dn; double dc; bool dp;
+      plate_vote_.Finalize(ch, oid, &dn, &dc, &dp);  // 투표함 비우기(결과 폐기)
+      char fm[256];
+      snprintf(fm, sizeof(fm), "%s★ PLATE FINAL ch%d id%ld -> \"%s\" (instant, conf %.2f, src=good-shot)%s",
+               Hl(cfg::kAnsiFinal), ch, oid, r.text.c_str(), r.confidence,
+               Hl(cfg::kAnsiReset));
+      EmitEvent(ch, fm);
+    } else {
+      plate_vote_.Add(ch, oid, r.text, r.confidence,
+                      /*primary=*/sharp >= cfg::kGoodshotSharpMin);
+    }
   }
 }
 
@@ -628,6 +645,7 @@ void SampleComponent::RefreshSnapshot(int ch) {
 void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, float b,
                                   uint64_t now_ms) {
   if (!plate_ocr_ready_ || r <= l || b <= t) return;
+  if (plate_done_[ch].count(oid)) return;  // 즉시확정된 차 — 표도 CPU 도 불필요
   if (!plate_vote_.CanSample(ch, oid, now_ms)) return;
 
   RefreshSnapshot(ch);  // 스냅샷 주문(스로틀) + 캐시 갱신
@@ -654,7 +672,8 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
   if (x1 - x0 < 48 || y1 - y0 < 16) return;  // 너무 작으면(멀면) 스킵
 
   cv::Mat crop = frame(cv::Rect(x0, y0, x1 - x0, y1 - y0));
-  PlateOcrResult br = plate_ocr_.Recognize(crop);
+  // 버스트는 경량 파이프라인(후보 3, 구조대 생략) — 참고 표에 풀코스는 과함(부하 다이어트)
+  PlateOcrResult br = plate_ocr_.Recognize(crop, /*light=*/true);
   // 스냅샷-bbox 시간 어긋남 시 tinyLPR 이 conf 0.5~0.85 짜리 "환각 번호판"을 지어냄(실측).
   // 진짜 판독은 0.93+ 로 관측 → 0.90 미만은 전부 버린다.
   if (br.text.empty() || br.confidence < 0.90) return;
@@ -820,6 +839,12 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
     uint64_t grace    = has_primary ? cfg::kStaleFrames : cfg::kStaleFrames * 3;
     uint64_t grace_ms = has_primary ? cfg::kStaleMs : cfg::kStaleMs * 3;
     if (it->second.tick + grace < tick || it->second.ms + grace_ms < now_ms) {
+      // 즉시확정으로 이미 판정이 끝난 차 — 조용히 정리만 (이중판정 방지)
+      if (plate_done_[ch].erase(it->first)) {
+        stack_acc_[ch].erase(it->first);
+        it = plate_seen_[ch].erase(it);
+        continue;
+      }
       // [스태킹] 확정 직전, 이 차의 버스트 평균본(노이즈 √N 상쇄)으로 마지막 1표 시도
       auto sa = stack_acc_[ch].find(it->first);
       if (sa != stack_acc_[ch].end()) {
@@ -852,6 +877,12 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
                  trusted ? "FINAL" : "HOLD ", ch, it->first, fin.c_str(), nvotes, fconf,
                  fprim ? "good-shot" : "burst", Hl(cfg::kAnsiReset));
         EmitEvent(ch, m);
+        // FINAL 로 끝난 차는 늦게 도착하는 good-shot 재판독을 막는다 (이중 FINAL 방지).
+        // HOLD 는 일부러 안 막음 — 늦은 good-shot 1.00 이 오면 승격 기회를 준다.
+        if (trusted) {
+          plate_done_[ch].insert(it->first);
+          if (plate_done_[ch].size() > 256) plate_done_[ch].clear();  // oid 는 재사용 안 됨 — 폭주만 방지
+        }
       }
       it = plate_seen_[ch].erase(it);
     } else {

@@ -79,13 +79,19 @@ constexpr int kStackMinFrames = 3;   // 최소 이 장수 이상 모였을 때�
 //   게인 노이즈로 바뀌어 효과 기대. 파라미터는 PC 검증값(h=5, template 7, search 15).
 constexpr bool kDenoise2ndPass = true;
 
+// ===== tinyLPR 인퍼런스 스레드 수 =====
+//   2 실험 낙제(2026-07-28 17시): 첫 판독부터 178ms 로 오히려 느려지고 직후 앱이
+//   얼어붙음 — 스레드풀 스핀 대기가 2코어를 독점해 다른 스레드가 전부 굶은 것으로
+//   추정. 이 SoC/cgroup 조합에선 1 이 정답.
+constexpr int kTfliteThreads = 1;
+
 // ===== 버스트 샘플링 (부하 다이어트 2026-07-28) =====
-//   웜업: 번호판 첫 감지 후 이 시간 동안은 버스트를 안 딴다 — 초반 크롭은 차가
-//   제일 멀 때라 최저화질(작은 box, 낮은 conf)이면서 CPU 만 먹는 표였음(실측:
-//   sample#1 이 거의 항상 그 차의 최저 conf). 상한도 12→6 으로 절반.
-constexpr uint64_t kBurstWarmupMs = 1000;  // 첫 감지 후 웜업(ms)
+//   상한 3 + 웜업 1초(첫 감지 직후 최저화질 구간 스킵). 웜업 1차 시도는 낙제였지만
+//   그건 즉시확정 도입 전 — 지금은 good-shot 0.99+ 가 대부분을 즉석에서 끝내
+//   버스트 의존도가 낮아져 재도전(사용자 결정). HOLD 급증 시 웜업만 원복할 것.
+constexpr uint64_t kBurstWarmupMs = 1000;  // 첫 감지 후 이 시간은 버스트 안 딴다
 constexpr uint64_t kBurstThrottleMs = 150; // 샘플 간 최소 간격(ms)
-constexpr int kBurstMax = 6;               // 차당 버스트 상한 (good-shot 별도 +1표)
+constexpr int kBurstMax = 3;               // 차당 버스트 상한 (good-shot 별도 +1표)
 
 // ===== good-shot 품질 검문소 =====
 //   선명도(라플라시안 분산). 주의: 이 지표는 노이즈에 오염됨 — 노이즈 심하면 정상이
@@ -94,10 +100,18 @@ constexpr int kBurstMax = 6;               // 차당 버스트 상한 (good-shot
 constexpr double kGoodshotSharpMin = 10.0;
 
 // ===== 번호판 최종확정(FINAL) 신뢰도 하한 =====
-//   0.95 하향 실험은 롤백(2026-07-28) — 지터가 정답 0.95~0.96 을 오답으로 바꿔치기하는
-//   사고가 커져서 원복. 가공은 "게이트 미달(=어차피 HOLD)일 때만" 개입하도록 별도 봉합.
-constexpr double kFinalConfFloor = 0.96;
-constexpr double kRescueConfCap  = 0.95;   // 가공 결과 conf 상한 — 게이트보다 항상 아래
+//   0.95 재개방(2026-07-28 오후, 사용자 결정): 첫 0.95 실험을 망친 범인(지터가
+//   FINAL 자격 판독을 바꿔치기)은 봉합 완료라 재도전 조건이 다름. 캡은 0.94 로
+//   내려 "가공은 단독으로 게이트를 못 넘는다" 원칙 유지.
+constexpr double kFinalConfFloor = 0.95;
+constexpr double kRescueConfCap  = 0.94;   // 가공 결과 conf 상한 — 게이트보다 항상 아래
+
+// ===== good-shot 즉시확정 =====
+//   good-shot 원본 판독(가공 아님)이 이 값 이상이면 개표를 기다리지 않고 그 자리에서
+//   ★FINAL + 그 차의 버스트·재판독 전부 중단(CPU 절약). 전 로그 실측: 0.99·1.00 은
+//   틀린 사례 0회, 0.98 은 오독 실례 있음(09서2646) → 0.985 가 안전 하한
+//   (표시 0.99 = 내부 0.985~0.994 라 0.99·1.00 을 모두 포섭).
+constexpr double kInstantFinalConf = 0.985;
 
 // ===== 디버그 뷰어 로그 강조 (ANSI 색상) =====
 //   뷰어가 이스케이프 코드를 못 그려서 "[1;92m" 같은 문자가 그대로 보이면 false 로 끄기.
