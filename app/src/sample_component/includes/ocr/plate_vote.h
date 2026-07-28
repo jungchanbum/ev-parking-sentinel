@@ -19,14 +19,16 @@
 // ============================================================================
 class PlateVote {
  public:
-  // 이 oid 에 지금 버스트 샘플을 시도해도 되는가 (스로틀 150ms + 상한 12개).
-  //   실측: 화질 열화 시 good-shot(Q45)보다 버스트(스냅샷 직접크롭)가 우세
-  //   (15노1199 를 버스트 8연속 conf 1.00 vs good-shot 쓰레기) → 표를 더 준다.
-  //   HOLD 로 끝나는 차 대부분이 샘플 1~2개 → 합의(반복) 형성 기회 확대가 재현율 처방.
+  // 이 oid 에 지금 버스트 샘플을 시도해도 되는가.
+  //   웜업 1초 + 스로틀 + 상한 6개 (cfg::kBurstWarmupMs/ThrottleMs/Max).
+  //   초반 1초는 차가 제일 멀어 최저화질 크롭만 나옴 — 표 가치 없이 CPU 만 먹어서
+  //   건너뛴다. 화질 열화 시 버스트가 good-shot(Q45)을 역전하는 보험 역할은 유지.
   bool CanSample(int ch, long oid, uint64_t now_ms) {
     Entry& e = map_[Key(ch, oid)];
-    if ((int)e.samples.size() >= 12) return false;
-    if (e.last_ms != 0 && now_ms - e.last_ms < 150) return false;
+    if (e.first_ms == 0) e.first_ms = now_ms;                       // 첫 감지 시각 기록
+    if (now_ms - e.first_ms < cfg::kBurstWarmupMs) return false;    // 웜업: 아직 안 딴다
+    if ((int)e.samples.size() >= cfg::kBurstMax) return false;
+    if (e.last_ms != 0 && now_ms - e.last_ms < cfg::kBurstThrottleMs) return false;
     e.last_ms = now_ms;
     return true;
   }
@@ -103,6 +105,7 @@ class PlateVote {
   struct Sample { std::string text; double conf; bool primary; };
   struct Entry {
     std::vector<Sample> samples;
+    uint64_t first_ms = 0;   // 첫 샘플 시도 시각 ≒ 번호판 첫 감지 (웜업 기준점)
     uint64_t last_ms = 0;
     bool has_primary = false;
   };

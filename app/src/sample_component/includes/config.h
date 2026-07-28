@@ -79,6 +79,14 @@ constexpr int kStackMinFrames = 3;   // 최소 이 장수 이상 모였을 때�
 //   게인 노이즈로 바뀌어 효과 기대. 파라미터는 PC 검증값(h=5, template 7, search 15).
 constexpr bool kDenoise2ndPass = true;
 
+// ===== 버스트 샘플링 (부하 다이어트 2026-07-28) =====
+//   웜업: 번호판 첫 감지 후 이 시간 동안은 버스트를 안 딴다 — 초반 크롭은 차가
+//   제일 멀 때라 최저화질(작은 box, 낮은 conf)이면서 CPU 만 먹는 표였음(실측:
+//   sample#1 이 거의 항상 그 차의 최저 conf). 상한도 12→6 으로 절반.
+constexpr uint64_t kBurstWarmupMs = 1000;  // 첫 감지 후 웜업(ms)
+constexpr uint64_t kBurstThrottleMs = 150; // 샘플 간 최소 간격(ms)
+constexpr int kBurstMax = 6;               // 차당 버스트 상한 (good-shot 별도 +1표)
+
 // ===== good-shot 품질 검문소 =====
 //   선명도(라플라시안 분산). 주의: 이 지표는 노이즈에 오염됨 — 노이즈 심하면 정상이
 //   100~366 으로 부풀고, BLC 로 화질이 깨끗해지면 정상이 12~31 까지 내려옴(실측).
