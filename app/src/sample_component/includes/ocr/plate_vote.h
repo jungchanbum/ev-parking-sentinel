@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -39,6 +40,17 @@ class PlateVote {
   int Count(int ch, long oid) const {
     auto it = map_.find(Key(ch, oid));
     return it == map_.end() ? 0 : (int)it->second.samples.size();
+  }
+
+  // 투표함에 text 와 다른 텍스트가 min_conf 이상으로 이미 들어와 있는가.
+  //   즉시확정 발사 전 충돌 검사용 — 버스트가 먼저 정답 0.98 을 내놨는데 good-shot
+  //   오독 0.99 가 그걸 무시하고 즉시확정한 사고(22소2542) 봉합.
+  bool HasConflict(int ch, long oid, const std::string& text, double min_conf) const {
+    auto it = map_.find(Key(ch, oid));
+    if (it == map_.end()) return false;
+    for (const auto& s : it->second.samples)
+      if (s.text != text && s.conf >= min_conf) return true;
+    return false;
   }
 
   // good-shot(primary) 샘플이 이미 들어왔는가 — 없으면 확정을 미뤄서
@@ -81,11 +93,34 @@ class PlateVote {
       // 반복 보너스 + good-shot 가중. primary 가중이 없으면 "같은 오독 2회"의 버스트가
       // 정답 good-shot(1.00)을 1.01 로 역전하는 사고 발생(실측 25누5700 사건).
       double score = g.max_conf + 0.02 * std::min(g.count - 1, 3) + (g.primary ? 0.02 : 0.0);
-      if (score > best_score || (score == best_score && g.primary)) {
+      // 동점이면 max_conf 높은 쪽 우선 (그 다음에야 primary) — primary 우선 동점 규칙이
+      // 버스트 정답 1.00 을 good-shot 오답 0.98(+가중 0.02=동점)로 눌러버린 사고 봉합
+      // (27어8957 vs 27머8257 실측, 2026-07-28).
+      bool better = score > best_score ||
+                    (score == best_score && best_g != nullptr &&
+                     (g.max_conf > best_g->max_conf ||
+                      (g.max_conf == best_g->max_conf && g.primary && !best_g->primary)));
+      if (better) {
         best_score = score; best_text = kv.first; best_g = &g;
       }
     }
     *conf = best_g->max_conf; *from_primary = best_g->primary;
+    // ---- 한글 접전 감지: 숫자는 완전히 같고 한글만 다른 경쟁 그룹이 conf 0.03 이내로
+    // 붙어 있으면 증거 불충분 → 캡(HOLD 행). tinyLPR 약점이 한글 음절 구분이라
+    // 오확정 전원이 이 패턴이었음(27하8257/15누1199/22소2542 — 전부 정답이 버스트에
+    // 있었는데 근소 차로 눌림). 교차합의(primary+2표 일치) 우승자는 면제.
+    bool contested = false;
+    if (!(best_g->primary && best_g->count >= 2)) {
+      for (const auto& kv : groups) {
+        if (kv.first == best_text) continue;
+        if (DigitsOf(kv.first) == DigitsOf(best_text) &&
+            std::fabs(kv.second.max_conf - best_g->max_conf) <= 0.03) {
+          contested = true;
+          break;
+        }
+      }
+    }
+    if (contested) *conf = std::min(*conf, cfg::kRescueConfCap);
     // 게이트용 conf 를 증거 수준에 맞게 조정 (오늘 전 로그 실측 규칙):
     //  - 교차 합의(good-shot+버스트가 같은 텍스트, 2표+)는 틀린 적 0회 → 0.97 로 승격
     //    (36라7833 이 0.93×2 합의인데 HOLD 로 버려지던 문제)
@@ -106,6 +141,13 @@ class PlateVote {
     uint64_t last_ms = 0;
     bool has_primary = false;
   };
+  // 텍스트에서 숫자만 추출 — "한글만 다른 접전" 판별용 (27하8257 vs 27머8257 → "278257" 동일)
+  static std::string DigitsOf(const std::string& t) {
+    std::string d;
+    for (char c : t)
+      if (c >= '0' && c <= '9') d += c;
+    return d;
+  }
   static long long Key(int ch, long oid) { return ((long long)ch << 48) ^ (long long)oid; }
   std::map<long long, Entry> map_;
 };

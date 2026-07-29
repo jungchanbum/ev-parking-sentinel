@@ -187,8 +187,9 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     snprintf(lumbuf, sizeof(lumbuf), "%.0f>%.0f", r.crop_lum, r.crop_lum_fixed);
   else
     snprintf(lumbuf, sizeof(lumbuf), "%.0f", r.crop_lum);
-  snprintf(m1, sizeof(m1), "  tinyLPR(%d cands): \"%s\" (conf %.2f, %.1fms) | lum %s | color %s | rescue %.1fms",
-           r.cand_total, r.tiny_text.c_str(), r.tiny_conf, r.tiny_ms, lumbuf,
+  snprintf(m1, sizeof(m1), "  tinyLPR(%d cands): \"%s\" (conf %.2f, %.1fms) | win %s | lum %s | color %s | rescue %.1fms",
+           r.cand_total, r.tiny_text.c_str(), r.tiny_conf, r.tiny_ms,
+           r.win_cand.empty() ? "-" : r.win_cand.c_str(), lumbuf,
            r.color.c_str(), r.denoise_ms);
   EmitEvent(ch, m1);
 
@@ -203,10 +204,18 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
   //   물렁한(sharp<50) good-shot 이 선명한 버스트를 가중으로 누르는 사고 방지.
   long oid = plate_store_.last_oid(ch);
   if (oid != 0 && plate_decode::ValidPlateFormat(r.text)) {
-    // ★ 즉시확정: good-shot 원본 판독 1.00 은 전 로그에서 틀린 적 0회 → 개표 생략.
-    //   (가공 결과는 캡 0.94 라 여기 못 옴 — 원본만 자격.) 이후 이 차의 버스트·
+    // ★ 즉시확정: good-shot 원본 판독 0.99+ 는 개표 생략. 단 발사 전 충돌 검사 —
+    //   투표함에 이미 다른 텍스트가 0.95+ 로 들어와 있으면(=버스트가 반박 중) 보류하고
+    //   투표로 넘긴다 (오독 0.99 instant 가 버스트 정답 0.98 을 무시한 22소2542 사건).
+    //   (가공 결과는 캡 0.94 라 여기 못 옴 — 원본만 자격.) 즉시확정된 차의 버스트·
     //   재판독·개표는 plate_done_ 으로 전부 차단 (CPU 절약 + 이중판정 방지).
-    if (r.confidence >= cfg::kInstantFinalConf) {
+    bool conflict = plate_vote_.HasConflict(ch, oid, r.text, cfg::kFinalConfFloor);
+    if (r.confidence >= cfg::kInstantFinalConf && conflict) {
+      char cm[128];
+      snprintf(cm, sizeof(cm), "  instant hold ch%d id%ld: 버스트 반박 존재 -> 투표행", ch, oid);
+      EmitEvent(ch, cm);
+    }
+    if (r.confidence >= cfg::kInstantFinalConf && !conflict) {
       last_final_[ch] = r.text;
       plate_done_[ch].insert(oid);
       int dn; double dc; bool dp;

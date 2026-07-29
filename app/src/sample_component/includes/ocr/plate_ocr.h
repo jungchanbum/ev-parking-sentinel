@@ -31,6 +31,7 @@ struct PlateOcrResult {
   double crop_lum = 0.0;    // 이긴 크롭의 평균 밝기 (조도 진단 — 쌍라이트/역광 확인용)
   double crop_lum_fixed = 0.0;  // 조도 정규화 후 평균 밝기 (0 = 보정 미발동)
   int cand_total = 0;       // 시도한 후보 크롭 수
+  std::string win_cand;     // 우승 후보 이름 (후보 다이어트용 계측: orig/box0m0/ctr1 등)
   double total_ms = 0.0;    // Recognize() 전체 (후보생성+전수 OCR)
 };
 
@@ -70,17 +71,19 @@ class PlateOcr {
     };
 
     // ---- 후보 크롭 전수 OCR(tinyLPR) → 유효(포맷+색) > 신뢰도 로 최고 후보 선택 ----
-    std::vector<cv::Mat> cands = MakeCandidates(gray, light);
+    std::vector<std::string> cnames;
+    std::vector<cv::Mat> cands = MakeCandidates(gray, light, &cnames);
     r.cand_total = (int)cands.size();
     cv::Mat best_crop = gray;
     std::string best_txt; double best_conf = -1.0; bool best_valid = false;
     auto t0 = clk::now();
-    for (const cv::Mat& c : cands) {
+    for (size_t i = 0; i < cands.size(); i++) {
       std::string txt; double conf;
-      RunKr(c, &txt, &conf);
+      RunKr(cands[i], &txt, &conf);
       bool v = validc(txt);
       if ((v && !best_valid) || (v == best_valid && conf > best_conf)) {
-        best_valid = v; best_conf = conf; best_txt = txt; best_crop = c;
+        best_valid = v; best_conf = conf; best_txt = txt; best_crop = cands[i];
+        r.win_cand = cnames[i];
       }
     }
     r.tiny_ms = ms_since(t0);
@@ -233,9 +236,15 @@ class PlateOcr {
   // ---- 후보 크롭 생성 (candidates_test.py 와 동일 파라미터) ----
   //   ①원본  ②밝은영역 박스 top2 × 마진 2종  ③중앙크롭 3종  = 최대 8개
   // light: 후보를 3개로 압축 (원본 + 밝은박스 top1×타이트마진 + 중앙 1종) — 버스트용
-  static std::vector<cv::Mat> MakeCandidates(const cv::Mat& gray, bool light = false) {
+  // names: 후보별 이름(orig/boxN.mM/ctrN) — 우승 통계로 무용 후보를 솎아내기 위한 계측
+  static std::vector<cv::Mat> MakeCandidates(const cv::Mat& gray, bool light = false,
+                                             std::vector<std::string>* names = nullptr) {
     std::vector<cv::Mat> out;
-    out.push_back(gray);
+    auto add = [&](const cv::Mat& m, const std::string& n) {
+      out.push_back(m);
+      if (names) names->push_back(n);
+    };
+    add(gray, "orig");
 
     // 밝은영역(흰 번호판) 후보: Otsu 이진화 → 가로로 닫기 → 번호판 비율 사각형
     cv::Mat g, th;
@@ -256,8 +265,10 @@ class PlateOcr {
     }
     std::sort(boxes.begin(), boxes.end(),
               [](const auto& a, const auto& b) { return a.first > b.first; });
+    // 우승 통계(2026-07-28, 32판): ctr0 19 / ctr2 10 / box0m0 1 / box0m1 1 / ctr1 1(쓰레기) /
+    // orig 0(폴백용 유지) / box1 계열 0 → box1×2·ctr1 사형, 8후보→5후보 (~37% 절감).
     const double margins[2][2] = {{0.06, 0.15}, {0.14, 0.35}};  // (가로, 세로) 마진 비율
-    const size_t max_boxes = light ? 1 : 2;
+    const size_t max_boxes = 1;                 // 2등 박스(box1)는 0승 — 제거
     const size_t max_margins = light ? 1 : 2;
     for (size_t i = 0; i < boxes.size() && i < max_boxes; i++) {
       const cv::Rect& b = boxes[i].second;
@@ -267,17 +278,20 @@ class PlateOcr {
         cv::Rect rc(std::max(0, b.x - mx), std::max(0, b.y - my), 0, 0);
         rc.width = std::min(W, b.x + b.width + mx) - rc.x;
         rc.height = std::min(H, b.y + b.height + my) - rc.y;
-        if (rc.width >= 16 && rc.height >= 8) out.push_back(gray(rc));
+        if (rc.width >= 16 && rc.height >= 8)
+          add(gray(rc), "box" + std::to_string(i) + "m" + std::to_string(mi));
       }
     }
 
-    // 중앙크롭 (번호판이 크롭 중앙에 있는 경향) — light 는 1종만
-    const double centers[3][2] = {{0.7, 0.45}, {0.55, 0.35}, {0.85, 0.6}};
-    const size_t max_centers = light ? 1 : 3;
+    // 중앙크롭 (번호판이 크롭 중앙에 있는 경향) — light 는 1종만.
+    // 구 ctr1(55%×35%, 과소 크롭)은 1승(그마저 오독)으로 사형 — ctr1 은 이제 85%×60%.
+    const double centers[2][2] = {{0.7, 0.45}, {0.85, 0.6}};
+    const size_t max_centers = light ? 1 : 2;
     for (size_t ci = 0; ci < max_centers; ci++) {
       int cw = (int)(W * centers[ci][0]), ch = (int)(H * centers[ci][1]);
       if (cw >= 16 && ch >= 8)
-        out.push_back(gray(cv::Rect((W - cw) / 2, (H - ch) / 2, cw, ch)));
+        add(gray(cv::Rect((W - cw) / 2, (H - ch) / 2, cw, ch)),
+            "ctr" + std::to_string(ci));
     }
     return out;
   }
