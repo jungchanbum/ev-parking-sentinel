@@ -40,6 +40,10 @@ constexpr double kUnsharpSigma  = 1.5;    // 블러 반경 px
 // OCR 최소 크롭 폭(px): 이보다 작으면(=차가 너무 멀면) 인식 스킵.
 //   실측: 144·272px 크롭은 환각(conf 0.6~0.9 쓰레기), 328px+ 는 정상 판독.
 constexpr int kMinOcrCropWidth = 300;
+// 세로 하한(07-29 실측): 높이 136~168 납작 크롭은 글자가 ~15px 라 전량 쓰레기(conf
+// 0.6~0.9 환각 → HOLD 소음의 60%), 184px 이상은 전부 정상 판독. 경계 176 에 컷.
+// 걸리는 건 대부분 같은 차의 부스러기 중복 트랙이라 본 트랙 FINAL 로 손실 없음.
+constexpr int kMinOcrCropHeight = 176;
 
 // ===== 번호판 숫자 인식(OCR) 모델 경로 =====
 //   PC(ocr_lab)에서 검증한 tinyLPR 단독 (Multi-line 은 기여 0 실측으로 제거 — 경량화).
@@ -73,6 +77,12 @@ constexpr bool kJitterEnsemble = true;   // conf<0.98 인 애매한 판에만 �
 constexpr bool kBurstStack = false;
 constexpr int kStackMinFrames = 3;   // 최소 이 장수 이상 모였을 때만 평균 판독
 
+// ===== 구조대 체인(샤프닝·디노이즈·채널) 마스터 스위치 =====
+//   부하 다이어트(07-29): 건당 100~460ms 를 먹는 최대 낭비 구간인데, 캡 0.94 라
+//   단독으론 FINAL 을 못 만들고 산출물 대부분이 쓰레기 실측 → 완전 오프.
+//   이 구간이 살리던 저화질 판은 DB 최근접 매칭 레이어가 이어받는다.
+constexpr bool kRescueChain = false;
+
 // ===== 2단계 디노이즈 재판독 =====
 //   광학 TTA 16종 중 유일하게 실측 이득이 있던 변형(fastNlMeans, PC +3%p).
 //   이긴 후보 크롭에만 적용해 conf 가 오르면 채택 — 셔터 1/500 이후 오독의 주원인이
@@ -93,6 +103,17 @@ constexpr uint64_t kBurstWarmupMs = 1000;  // 첫 감지 후 이 시간은 버�
 constexpr uint64_t kBurstThrottleMs = 150; // 샘플 간 최소 간격(ms)
 constexpr int kBurstMax = 3;               // 차당 버스트 상한 (good-shot 별도 +1표)
 
+// ===== 등록차량 DB 최근접 매칭 =====
+//   HOLD 회수 + FINAL 교정 레이어 (plate_db.h). 파일 없으면 자동 오프(순수 인식 모드).
+//   db-rescue 최소 conf: 쓰레기 판독(0.5~0.8)이 우연히 1글자 매칭돼 승격되는 것 방지.
+constexpr bool kPlateDb = true;
+constexpr const char* kPlateDbFile = "../res/ocr_models/registered_plates.txt";
+//   07-29 실측 하향(0.85/0.90 → 0.80/0.85): 42주0129(0.89)·36보7833(0.85)이 하한에
+//   아깝게 걸려 억류됐는데, 같은 런의 진짜 쓰레기들은 전부 2글자+ 어긋나 하한을
+//   내려도 오회수 0건이었음. 유일매칭+등록부 제약이 이미 강한 그물이라 conf 는 보조핀.
+constexpr double kDbRescueExactMin = 0.80;  // 정확 일치 회수 최소 conf
+constexpr double kDbRescueEd1Min   = 0.85;  // 1글자 교정 회수 최소 conf
+
 // ===== good-shot 품질 검문소 =====
 //   선명도(라플라시안 분산). 주의: 이 지표는 노이즈에 오염됨 — 노이즈 심하면 정상이
 //   100~366 으로 부풀고, BLC 로 화질이 깨끗해지면 정상이 12~31 까지 내려옴(실측).
@@ -112,6 +133,10 @@ constexpr double kRescueConfCap  = 0.94;   // 가공 결과 conf 상한 — 게�
 //   틀린 사례 0회, 0.98 은 오독 실례 있음(09서2646) → 0.985 가 안전 하한
 //   (표시 0.99 = 내부 0.985~0.994 라 0.99·1.00 을 모두 포섭).
 constexpr double kInstantFinalConf = 0.985;
+// 즉시확정 충돌 검사 문턱: 투표함의 반박 텍스트가 이 값 이상일 때만 instant 보류.
+//   0.95 로 두면 버스트 잡음(0.95~0.97 오독)이 1.00 정답의 instant 를 막고, 이어서
+//   접전 룰이 그 정답을 HOLD 로 눌러버리는 사고 발생(09서2645 1.00 인질 사건, 07-29).
+constexpr double kInstantConflictConf = 0.98;
 
 // ===== 디버그 뷰어 로그 강조 (ANSI 색상) =====
 //   뷰어가 이스케이프 코드를 못 그려서 "[1;92m" 같은 문자가 그대로 보이면 false 로 끄기.

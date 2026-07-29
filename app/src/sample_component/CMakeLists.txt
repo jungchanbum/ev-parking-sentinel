@@ -34,4 +34,4 @@ install (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/manifests/ DESTINATION ${CMAKE_HO
 
 # 번호판 OCR 모델(tinyLPR 단독) — TFLite 파일 + 문자셋(label)만 패키징 (Multi-line 제거).
 install (DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ocr_models/ DESTINATION ${CMAKE_HOME_DIRECTORY}/res/ocr_models
-         FILES_MATCHING PATTERN "kr_lpr*")
+         FILES_MATCHING PATTERN "kr_lpr*" PATTERN "registered_plates.txt")

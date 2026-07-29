@@ -14,6 +14,7 @@
 #include "io/i_event_sink.h"       // [1단계] 이벤트 출구 이음새
 #include "core/motion_tracker.h"   // [3단계] 채널별 움직임 추적
 #include "core/plate_store.h"      // [3단계] 번호판 크롭 저장
+#include "ocr/plate_db.h"          // 등록차량 목록 최근접 매칭 (HOLD 회수·FINAL 교정)
 #include "ocr/plate_ocr.h"         // 번호판 숫자 인식(tinyLPR+Multi-line 신뢰도 병합)
 #include "ocr/plate_vote.h"        // 시간축(버스트) 샘플 누적 + 자리별 다수결
 
@@ -57,6 +58,10 @@ class SampleComponent : public Component, public ISampleComponent {
   bool plate_ocr_ready_ = false;                 // 모델 로드 성공 여부
   void RecognizePlate(int ch, int slot);         // cap_<slot>.jpg 읽어 인식 + 이벤트+저장
   PlateOcrResult last_plate_ocr_[4];             // 채널별 마지막 인식 결과 (HTTP /platetext)
+
+  // [DB 매칭] 등록차량 목록 — HOLD 회수(db-rescue)·FINAL 교정(db-fix)
+  PlateDb plate_db_;
+  bool plate_db_ready_ = false;
 
   // [시간축 버스트] 추적 중 bbox+스냅샷으로 샘플 추가 캡처 → 자리별 다수결로 최종 확정
   PlateVote plate_vote_;

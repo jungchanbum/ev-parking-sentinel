@@ -79,6 +79,11 @@ bool SampleComponent::Initialize() {
   plate_ocr_ready_ = plate_ocr_.Load(cfg::kKrLprModel, cfg::kKrLprLabels);
   printf("[object_detect] plate OCR model %s\n", plate_ocr_ready_ ? "loaded" : "FAILED to load");
 
+  // 등록차량 DB 로드 — 파일 없으면 순수 인식 모드로 동작
+  plate_db_ready_ = cfg::kPlateDb && plate_db_.Load(cfg::kPlateDbFile);
+  printf("[object_detect] plate DB %s (%d plates)\n",
+         plate_db_ready_ ? "loaded" : "off", plate_db_ready_ ? plate_db_.size() : 0);
+
   printf("[object_detect] app started, waiting for metadata...\n");
   // DEBUG VIEWER 에도 시작 알림 (연결 확인용)
   SendTargetEvents(ILogManager::remote_debug_message_group,
@@ -155,11 +160,11 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     return;
   }
 
-  // 초소형 크롭(먼 차)은 환각만 만들므로 스킵 — 실측 근거는 config.h 주석 참고.
-  if (img.cols < cfg::kMinOcrCropWidth) {
+  // 초소형/납작 크롭(먼 차·부스러기 트랙)은 환각만 만들므로 스킵 — 근거는 config.h 주석.
+  if (img.cols < cfg::kMinOcrCropWidth || img.rows < cfg::kMinOcrCropHeight) {
     char m[112];
-    snprintf(m, sizeof(m), "OCR skipped ch%d #%d: crop too small (%dx%d < %dpx)",
-             ch, slot, img.cols, img.rows, cfg::kMinOcrCropWidth);
+    snprintf(m, sizeof(m), "OCR skipped ch%d #%d: crop too small (%dx%d < %dx%d)",
+             ch, slot, img.cols, img.rows, cfg::kMinOcrCropWidth, cfg::kMinOcrCropHeight);
     EmitEvent(ch, m);
     return;
   }
@@ -209,20 +214,30 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     //   투표로 넘긴다 (오독 0.99 instant 가 버스트 정답 0.98 을 무시한 22소2542 사건).
     //   (가공 결과는 캡 0.94 라 여기 못 옴 — 원본만 자격.) 즉시확정된 차의 버스트·
     //   재판독·개표는 plate_done_ 으로 전부 차단 (CPU 절약 + 이중판정 방지).
-    bool conflict = plate_vote_.HasConflict(ch, oid, r.text, cfg::kFinalConfFloor);
+    bool conflict = plate_vote_.HasConflict(ch, oid, r.text, cfg::kInstantConflictConf);
     if (r.confidence >= cfg::kInstantFinalConf && conflict) {
       char cm[128];
       snprintf(cm, sizeof(cm), "  instant hold ch%d id%ld: 버스트 반박 존재 -> 투표행", ch, oid);
       EmitEvent(ch, cm);
     }
     if (r.confidence >= cfg::kInstantFinalConf && !conflict) {
-      last_final_[ch] = r.text;
+      // DB 교정: 즉시확정 텍스트가 미등록인데 유일 1글자 매칭이 있으면 등록 번호로 교정
+      std::string fin = r.text;
+      const char* dbtag = "";
+      if (plate_db_ready_) {
+        std::string dbtxt;
+        if (plate_db_.Match(fin, &dbtxt) == 1 && dbtxt != fin) {
+          fin = dbtxt;
+          dbtag = ", db-fix";
+        }
+      }
+      last_final_[ch] = fin;
       plate_done_[ch].insert(oid);
       int dn; double dc; bool dp;
       plate_vote_.Finalize(ch, oid, &dn, &dc, &dp);  // 투표함 비우기(결과 폐기)
       char fm[256];
-      snprintf(fm, sizeof(fm), "%s★ PLATE FINAL ch%d id%ld -> \"%s\" (instant, conf %.2f, src=good-shot)%s",
-               Hl(cfg::kAnsiFinal), ch, oid, r.text.c_str(), r.confidence,
+      snprintf(fm, sizeof(fm), "%s★ PLATE FINAL ch%d id%ld -> \"%s\" (instant, conf %.2f, src=good-shot%s)%s",
+               Hl(cfg::kAnsiFinal), ch, oid, fin.c_str(), r.confidence, dbtag,
                Hl(cfg::kAnsiReset));
       EmitEvent(ch, fm);
     } else {
@@ -879,12 +894,32 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
       if (!fin.empty()) {
         // conf 하한 미달이면 FINAL 대신 HOLD — 시스템에 확정값으로 넘기지 않고 로그만 남긴다.
         bool trusted = fconf >= cfg::kFinalConfFloor;
+        // ---- DB 매칭 레이어 ----
+        //   HOLD 회수: 등록 번호와 정확 일치(conf≥0.85) 또는 유일 1글자 차이(conf≥0.90)
+        //   → FINAL 로 승격. FINAL 교정: 미등록 텍스트가 유일 1글자 매칭이면 등록 번호로.
+        //   복수 매칭·매칭 없음은 불개입 (미등록 차량은 그대로 통과/억류).
+        const char* dbtag = "";
+        if (plate_db_ready_) {
+          std::string dbtxt;
+          int m = plate_db_.Match(fin, &dbtxt);
+          if (m == 1) {
+            bool exact = (dbtxt == fin);
+            if (trusted) {
+              if (!exact) { fin = dbtxt; dbtag = ", db-fix"; }
+            } else if ((exact && fconf >= cfg::kDbRescueExactMin) ||
+                       (!exact && fconf >= cfg::kDbRescueEd1Min)) {
+              fin = dbtxt;
+              trusted = true;
+              dbtag = exact ? ", db-rescue" : ", db-rescue-fix";
+            }
+          }
+        }
         if (trusted) last_final_[ch] = fin;
         char m[256];
-        snprintf(m, sizeof(m), "%s%s PLATE %s ch%d id%ld -> \"%s\" (best-of-%d, conf %.2f, src=%s)%s",
+        snprintf(m, sizeof(m), "%s%s PLATE %s ch%d id%ld -> \"%s\" (best-of-%d, conf %.2f, src=%s%s)%s",
                  Hl(trusted ? cfg::kAnsiFinal : cfg::kAnsiWarn), trusted ? "★" : "?",
                  trusted ? "FINAL" : "HOLD ", ch, it->first, fin.c_str(), nvotes, fconf,
-                 fprim ? "good-shot" : "burst", Hl(cfg::kAnsiReset));
+                 fprim ? "good-shot" : "burst", dbtag, Hl(cfg::kAnsiReset));
         EmitEvent(ch, m);
         // FINAL 로 끝난 차는 늦게 도착하는 good-shot 재판독을 막는다 (이중 FINAL 방지).
         // HOLD 는 일부러 안 막음 — 늦은 good-shot 1.00 이 오면 승격 기회를 준다.

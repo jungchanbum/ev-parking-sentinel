@@ -89,12 +89,22 @@ inline bool ValidPlateFormat(const std::string& s) {
       return false;
     }
   }
-  int hangul_cnt = 0, hangul_pos = -1;
-  for (size_t j = 0; j < kinds.size(); j++)
-    if (kinds[j] == 1) { hangul_cnt++; hangul_pos = (int)j; }
-  if (hangul_cnt != 1) return false;
-  int before = hangul_pos, after = (int)kinds.size() - hangul_pos - 1;
-  return (before == 2 || before == 3) && after == 4;
+  int n = (int)kinds.size();
+  std::vector<int> hp;                       // 한글 위치들
+  for (int j = 0; j < n; j++)
+    if (kinds[j] == 1) hp.push_back(j);
+  // 일반판: 숫자(2~3) + 한글 + 숫자(4)  — 12가3456, 123가4568
+  if (hp.size() == 1) {
+    int before = hp[0], after = n - hp[0] - 1;
+    return (before == 2 || before == 3) && after == 4;
+  }
+  // 지역판(한 줄): 한글2(지역명) + 숫자(1~3) + 한글 + 숫자(4) — 서울12가3456, 경기27바8257
+  //   (두 줄 구형 지역판은 tinyLPR 이 한 줄 모델이라 별개 한계)
+  if (hp.size() == 3 && hp[0] == 0 && hp[1] == 1) {
+    int mid = hp[2] - 2, after = n - hp[2] - 1;
+    return mid >= 1 && mid <= 3 && after == 4;
+  }
+  return false;
 }
 
 }  // namespace plate_decode

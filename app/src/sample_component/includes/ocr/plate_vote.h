@@ -109,8 +109,11 @@ class PlateVote {
     // 붙어 있으면 증거 불충분 → 캡(HOLD 행). tinyLPR 약점이 한글 음절 구분이라
     // 오확정 전원이 이 패턴이었음(27하8257/15누1199/22소2542 — 전부 정답이 버스트에
     // 있었는데 근소 차로 눌림). 교차합의(primary+2표 일치) 우승자는 면제.
+    // 우승자 max_conf 0.99+ 는 접전 면제 — 0.97 오독 잡음이 1.00 정답을 "접전"으로
+    // 눌러 HOLD 시킨 사고 봉합(09서2645 인질 사건). 0.99/1.00 은 무조건 통과.
     bool contested = false;
-    if (!(best_g->primary && best_g->count >= 2)) {
+    if (best_g->max_conf < cfg::kInstantFinalConf &&
+        !(best_g->primary && best_g->count >= 2)) {
       for (const auto& kv : groups) {
         if (kv.first == best_text) continue;
         if (DigitsOf(kv.first) == DigitsOf(best_text) &&

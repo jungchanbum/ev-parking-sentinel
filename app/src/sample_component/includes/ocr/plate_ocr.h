@@ -100,10 +100,11 @@ class PlateOcr {
     //   지터가 정답 0.96 을 오답 0.94(캡)로 바꿔치기해 FINAL→오답 HOLD 로 만든 사고 실측
     //   (15노1199→15누1199, 25노5701→25누6701). 가공은 어차피 HOLD 인 판만 만진다.
     if (!light && cfg::kJitterEnsemble && r.confidence < cfg::kFinalConfFloor && best_crop.cols > 32) {
-      static const double J[5][2] = {{-3, 0}, {3, 0}, {0, -2}, {0, 2}, {0, 0}};  // 마지막=스케일
-      for (int j = 0; j < 5; j++) {
+      // 5회→3회 다이어트(07-29): 수직 지터는 우승 기여 실측 0 — 수평 ±3px + 스케일만
+      static const double J[3][2] = {{-3, 0}, {3, 0}, {0, 0}};  // 마지막=스케일
+      for (int j = 0; j < 3; j++) {
         cv::Mat moved;
-        if (j < 4) {
+        if (j < 2) {
           cv::Mat M = (cv::Mat_<double>(2, 3) << 1, 0, J[j][0], 0, 1, J[j][1]);
           cv::warpAffine(best_crop, moved, M, best_crop.size(),
                          cv::INTER_LINEAR, cv::BORDER_REPLICATE);
@@ -155,7 +156,7 @@ class PlateOcr {
     // ---- 2단계b: 구조 체인 (conf<0.90 일 때만, 전부 conf 0.95 캡) ----
     //   보정 결과는 원본보다 신뢰할 수 없음 → 챔피언십엔 참가하되 단독으로는
     //   FINAL 게이트(0.96)를 못 넘게 한다 (오답 승격 실측: 09저2643·42주8120 사건).
-    if (!light && r.confidence < 0.90) {
+    if (!light && cfg::kRescueChain && r.confidence < 0.90) {
       t0 = clk::now();
       auto try_rescue = [&](const cv::Mat& img, const char* tag) {
         std::string t2; double c2;
@@ -269,7 +270,7 @@ class PlateOcr {
     // orig 0(폴백용 유지) / box1 계열 0 → box1×2·ctr1 사형, 8후보→5후보 (~37% 절감).
     const double margins[2][2] = {{0.06, 0.15}, {0.14, 0.35}};  // (가로, 세로) 마진 비율
     const size_t max_boxes = 1;                 // 2등 박스(box1)는 0승 — 제거
-    const size_t max_margins = light ? 1 : 2;
+    const size_t max_margins = 1;               // 여유마진(box0m1)도 0~1승 — 제거 (07-29 실측)
     for (size_t i = 0; i < boxes.size() && i < max_boxes; i++) {
       const cv::Rect& b = boxes[i].second;
       for (size_t mi = 0; mi < max_margins; mi++) {
