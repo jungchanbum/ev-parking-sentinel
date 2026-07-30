@@ -17,9 +17,13 @@
 // ============================================================================
 class PlateDb {
  public:
+  // 한 줄 형식: "번호[,플래그...]" — 예: "15소5746" / "12가3456,ev" (전기차).
+  //   플래그 없는 기존 형식과 하위호환. 플래그는 차량365 백엔드가 등록 시점에
+  //   외부 조회(등록원부 fuelType 등)로 확정해 써 넣는 값이다.
   bool Load(const std::string& path) {
     plates_.clear();
     raw_.clear();
+    ev_.clear();
     std::ifstream ifs(path);
     if (!ifs) return false;
     std::string line;
@@ -28,10 +32,25 @@ class PlateDb {
              (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
         line.pop_back();
       if (line.empty() || line[0] == '#') continue;   // 주석/빈 줄 허용
-      plates_.push_back(Decode(line));
-      raw_.push_back(line);
+      std::string plate = line, flags;
+      size_t comma = line.find(',');
+      if (comma != std::string::npos) {
+        plate = line.substr(0, comma);
+        flags = line.substr(comma + 1);
+      }
+      if (plate.empty()) continue;
+      plates_.push_back(Decode(plate));
+      raw_.push_back(plate);
+      ev_.push_back(flags.find("ev") != std::string::npos);
     }
     return !plates_.empty();
+  }
+
+  // 등록 번호(raw 텍스트 정확 일치)의 전기차 플래그. 미등록이면 false.
+  bool IsEv(const std::string& plate) const {
+    for (size_t i = 0; i < raw_.size(); i++)
+      if (raw_[i] == plate) return ev_[i];
+    return false;
   }
 
   int size() const { return (int)raw_.size(); }
@@ -107,4 +126,5 @@ class PlateDb {
 
   std::vector<std::vector<uint32_t>> plates_;
   std::vector<std::string> raw_;
+  std::vector<bool> ev_;   // raw_ 와 같은 인덱스 — 전기차 플래그 (파일의 ",ev")
 };

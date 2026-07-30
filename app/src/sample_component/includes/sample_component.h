@@ -11,6 +11,7 @@
 
 #include "component.h"
 #include "i_sample_component.h"
+#include "io/ev_client.h"          // [EV 실조회] ev.or.kr 저공해 확인 (미등록 번호)
 #include "io/i_event_sink.h"       // [1단계] 이벤트 출구 이음새
 #include "core/motion_tracker.h"   // [3단계] 채널별 움직임 추적
 #include "core/plate_store.h"      // [3단계] 번호판 크롭 저장
@@ -67,6 +68,22 @@ class SampleComponent : public Component, public ISampleComponent {
   PlateVote plate_vote_;
   void BurstSample(int ch, long oid, float l, float t, float r, float b, uint64_t now_ms);
   std::string last_final_[4];                    // 채널별 마지막 확정 번호 (HTTP /platetext)
+
+  // [EV 판정] 최근 ★FINAL 이력 — /isev 가 "그 번호를 실제로 봤는가 + 판 색"을 조회.
+  //   color 는 그 채널 마지막 good-shot 의 판 색 분류(wh/ye/gr/bl) — bl = 전기차 파란판.
+  struct FinalRec { std::string text; std::string color; uint64_t ms; };
+  std::deque<FinalRec> finals_log_;              // 최근 64건 (전 채널 공용)
+  void RecordFinal(int ch, const std::string& text, uint64_t now_ms);
+
+  // [EV 실조회] 미등록 번호는 카메라가 직접 ev.or.kr 저공해 확인을 조회한다.
+  //   워커 스레드가 조회하고 결과를 ev_results_ 에 넣으면, 메타데이터 스레드가
+  //   DrainEvResults() 로 회수해 ⚡EV 이벤트를 발행 (EmitEvent 단일 스레드 규율).
+  //   ev_cache_: 번호 → {판정, 상세}. 판정 1=EV, 0=아님, -2=조회중 (중복 방지).
+  EvClient ev_client_;
+  std::map<std::string, std::pair<int, std::string>> ev_cache_;
+  std::deque<EvClient::Result> ev_results_;
+  std::mutex ev_mtx_;                            // ev_cache_/ev_results_ 보호
+  void DrainEvResults();
 
   // [스태킹] 버스트 크롭을 고정 캔버스에 합산 누적 → 추적 종료 시 평균내어 추가 1표.
   //   노이즈는 무작위라 N장 평균 시 √N 배 상쇄, 글자는 보존 (다중 프레임 스태킹).

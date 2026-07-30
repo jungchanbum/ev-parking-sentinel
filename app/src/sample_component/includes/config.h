@@ -138,6 +138,13 @@ constexpr double kInstantFinalConf = 0.985;
 //   접전 룰이 그 정답을 HOLD 로 눌러버리는 사고 발생(09서2645 1.00 인질 사건, 07-29).
 constexpr double kInstantConflictConf = 0.98;
 
+// ===== EV 실조회 (무공해차 통합누리집 ev.or.kr) =====
+//   미등록 번호판의 전기차 여부를 카메라가 직접 조회 (등록차는 DB 플래그 우선).
+//   근거(07-30 실측): 모니터 재생 리그에선 채도가 죽어 파란판이 wh 로 오판됨
+//   (테슬라 21보1502, BMW iX3 15주5957) — 색 추정만으론 실차 EV 를 놓친다.
+//   끄면 미등록차는 판색(bl) 추정으로 후퇴 (인터넷 없는 현장용).
+constexpr bool kEvLiveLookup = true;
+
 // ===== 디버그 뷰어 로그 강조 (ANSI 색상) =====
 //   뷰어가 이스케이프 코드를 못 그려서 "[1;92m" 같은 문자가 그대로 보이면 false 로 끄기.
 constexpr bool kAnsiLogs = true;
@@ -145,6 +152,7 @@ constexpr const char* kAnsiFinal = "\x1b[1;92m";  // FINAL 확정 (밝은 초록
 constexpr const char* kAnsiWarn  = "\x1b[1;93m";  // 저신뢰 FINAL (노랑 — conf<0.95 의심 구간)
 constexpr const char* kAnsiInfo  = "\x1b[96m";    // OCR 결과 (시안)
 constexpr const char* kAnsiDim   = "\x1b[90m";    // 버스트 샘플 (회색 — 참고용 잡음)
+constexpr const char* kAnsiEv    = "\x1b[1;95m";  // EV 판정 — 전기차 (밝은 자홍, 굵게)
 constexpr const char* kAnsiReset = "\x1b[0m";
 
 // ===== 움직임 감지 튜닝 값 (MotionTracker 가 사용) =====

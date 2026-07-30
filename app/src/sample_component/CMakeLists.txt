@@ -19,6 +19,10 @@ target_link_libraries(${TARGET_LIB} PRIVATE stdlib
   libjpeg-turbo libpng libjasper libprotobuf ittnotify zlib pthread dl
   tensorflowlite_c)
 
+# [EV 실조회] OpenSSL 링크 금지 — 플랫폼 자체 TLS(PSessionTls)와 같은 프로세스에
+#   다른 OpenSSL 을 동거시키면 첫 SSL 호출에서 앱이 즉사한다 (07-30 실측 2회).
+#   조회는 카메라 내장 curl/wget 을 popen 자식 프로세스로 실행 (io/ev_client.h).
+
 # tensorflowlite_c 는 동적 라이브러리(.so) — OpenCV(정적)와 달리 런타임에 별도 파일로
 # 필요. rpath=$ORIGIN 으로 "이 .so 와 같은 폴더"에서 찾게 하고, 아래 install(FILES...)
 # 로 libsample_component.so 와 같은 폴더에 함께 배치한다(패키징 시 .cap 에 포함됨).

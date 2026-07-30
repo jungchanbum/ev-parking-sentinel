@@ -40,11 +40,35 @@ namespace {
 // 디버그 뷰어 로그 강조: kAnsiLogs=false 면 빈 문자열(색 없음)로 대체.
 inline const char* Hl(const char* code) { return cfg::kAnsiLogs ? code : ""; }
 
+// [EV 실조회] ev_cache_ 판정값의 특수 상태 (1=EV, 0=아님 은 EvClient 규약)
+constexpr int kEvNone = -9;     // 캐시에 없음 — 첫 조회 필요
+constexpr int kEvPending = -2;  // 조회 요청됨 — 응답 대기중
+
 // 현재 시각(ms). 움직임 3초 유지 타이머용.
 uint64_t NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+// URL 퍼센트 인코딩 디코드 (/isev?plate=... 의 한글 UTF-8 처리)
+std::string UrlDecode(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '%' && i + 2 < s.size()) {
+      auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      int h = hex(s[i + 1]), l = hex(s[i + 2]);
+      if (h >= 0 && l >= 0) { out += (char)(h * 16 + l); i += 2; continue; }
+    }
+    out += (s[i] == '+') ? ' ' : s[i];
+  }
+  return out;
 }
 
 // (XML 파싱 헬퍼 FindAttr/Trim/ExtractPlate 는 [2단계]에서 core/metadata_parser.h 로 이동)
@@ -56,6 +80,7 @@ SampleComponent::SampleComponent() : SampleComponent(_SampleComponent_Id, "Sampl
 SampleComponent::SampleComponent(ClassID id, const char* name) : Component(id, name) {}
 
 SampleComponent::~SampleComponent() {
+  ev_client_.Stop();                // [EV 실조회] 워커 스레드 조인 (sink 보다 먼저)
   for (auto* s : sinks_) delete s;  // [1단계] 등록된 출구 정리
 }
 
@@ -71,6 +96,13 @@ bool SampleComponent::Initialize() {
   }));
   // [4단계] 확장성 증명: 새 출구(파일 이력)를 이 한 줄로 추가 — 도메인 코드는 그대로.
   sinks_.push_back(new DiskLogSink());
+
+  // [EV 실조회] 워커 시작. 이 콜백은 워커 스레드에서 불리므로 큐에만 적재하고,
+  //   이벤트 발행은 메타데이터 스레드의 DrainEvResults() 가 맡는다.
+  ev_client_.Start([this](const EvClient::Result& r) {
+    std::lock_guard<std::mutex> lk(ev_mtx_);
+    ev_results_.push_back(r);
+  });
 
   RegisterURI();                     // /detections HTTP 엔드포인트 등록
 
@@ -121,6 +153,8 @@ bool SampleComponent::ProcessAEvent(Event* event) {
 void SampleComponent::HandleMetadataEvent(Event* event) {
   if (event == nullptr || event->IsReply()) return;
 
+  DrainEvResults();  // [EV 실조회] 도착한 판정 결과를 이 스레드에서 발행
+
   auto attachment = event->GetAttachment<IPMetadataManager::MetadataOutput>();
   if (!attachment) return;
 
@@ -133,6 +167,99 @@ void SampleComponent::HandleMetadataEvent(Event* event) {
 // [1단계] 이벤트를 등록된 모든 출구(sink)로 뿌리기만 한다. 목적지는 sink 가 결정.
 void SampleComponent::EmitEvent(int channel, const std::string& msg) {
   for (auto* s : sinks_) s->OnEvent(channel, msg);
+}
+
+// [EV 판정] ★FINAL 발급 시 {번호, 판 색, 시각}을 이력에 기록 — /isev 조회용 —
+//   하고 그 자리에서 전기차 여부를 판정해 디버그 뷰어에 알린다.
+//   색은 그 채널 마지막 good-shot 판독의 판 색 분류(버스트 승리여도 같은 차의 색).
+//   판정: 등록차는 DB 플래그(등록 시점에 ev.or.kr 저공해 1종 조회로 확정된 ",ev")가
+//   정답, 미등록차는 판 색(bl=전기·수소 파란판)으로 추정. 색은 교차확인용 병기.
+void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_ms) {
+  const std::string color = last_plate_ocr_[ch].color;
+  finals_log_.push_back({text, color, now_ms});
+  while (finals_log_.size() > 64) finals_log_.pop_front();
+
+  std::string canon;
+  bool registered = plate_db_ready_ && plate_db_.Match(text, &canon) == 1;
+  const char* pc = color.empty() ? "?" : color.c_str();
+  char m[320];
+
+  if (registered) {  // 등록차 — DB 플래그(등록 시점에 ev.or.kr 로 확정된 값)가 정답
+    bool ev = plate_db_.IsEv(canon);
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (DB등록 ev %s, 판색 %s)%s",
+             Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
+             ev ? "★전기차★" : "일반차", ev ? "O" : "X", pc, Hl(cfg::kAnsiReset));
+    EmitEvent(ch, m);
+    return;
+  }
+
+  if (!cfg::kEvLiveLookup) {  // 실조회 꺼짐 — 판색(bl) 추정으로 후퇴
+    bool ev = color == "bl";
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (미등록: 색 추정, 판색 %s)%s",
+             Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
+             ev ? "★전기차★" : "일반차", pc, Hl(cfg::kAnsiReset));
+    EmitEvent(ch, m);
+    return;
+  }
+
+  // 미등록차 — 카메라가 ev.or.kr 을 직접 조회. 같은 번호는 캐시로 1회만.
+  int cached = kEvNone;
+  std::string cdetail;
+  {
+    std::lock_guard<std::mutex> lk(ev_mtx_);
+    auto it = ev_cache_.find(text);
+    if (it != ev_cache_.end()) {
+      cached = it->second.first;
+      cdetail = it->second.second;
+    } else {
+      ev_cache_[text] = {kEvPending, ""};  // 조회중 마크 — 중복 요청 방지
+    }
+  }
+  if (cached == kEvNone) {
+    ev_client_.Request(ch, text);
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ev.or.kr 실조회중... (판색 %s 참고)%s",
+             Hl(cfg::kAnsiInfo), ch, text.c_str(), pc, Hl(cfg::kAnsiReset));
+  } else if (cached == kEvPending) {
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 실조회 응답 대기중...%s",
+             Hl(cfg::kAnsiInfo), ch, text.c_str(), Hl(cfg::kAnsiReset));
+  } else {
+    bool ev = cached == 1;
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (실조회 캐시: %s, 판색 %s)%s",
+             Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
+             ev ? "★전기차★" : "일반차", cdetail.c_str(), pc, Hl(cfg::kAnsiReset));
+  }
+  EmitEvent(ch, m);
+}
+
+// [EV 실조회] 워커가 넣어둔 조회 결과를 메타데이터 스레드에서 회수해 발행.
+//   성공(1/0)은 캐시에 확정 기록, 실패(-1)는 캐시에서 지워 다음 FINAL 때 재시도.
+void SampleComponent::DrainEvResults() {
+  std::deque<EvClient::Result> rs;
+  {
+    std::lock_guard<std::mutex> lk(ev_mtx_);
+    if (ev_results_.empty()) return;
+    rs.swap(ev_results_);
+    for (const auto& r : rs) {
+      if (r.verdict >= 0) ev_cache_[r.plate] = {r.verdict, r.detail};
+      else ev_cache_.erase(r.plate);
+    }
+  }
+  for (const auto& r : rs) {
+    char m[384];
+    if (r.verdict == 1)
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ★전기차★ (ev.or.kr 실조회: %s)%s",
+               Hl(cfg::kAnsiEv), r.ch, r.plate.c_str(), r.detail.c_str(),
+               Hl(cfg::kAnsiReset));
+    else if (r.verdict == 0)
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 일반차 (ev.or.kr 실조회: %s)%s",
+               Hl(cfg::kAnsiDim), r.ch, r.plate.c_str(), r.detail.c_str(),
+               Hl(cfg::kAnsiReset));
+    else
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 판정불가 (%s) — 다음 확정 때 재시도%s",
+               Hl(cfg::kAnsiWarn), r.ch, r.plate.c_str(), r.detail.c_str(),
+               Hl(cfg::kAnsiReset));
+    EmitEvent(r.ch, m);
+  }
 }
 
 // 방금 PlateStore 가 저장한 cap_<slot>.jpg 를 다시 읽어 번호판 숫자를 인식.
@@ -232,6 +359,7 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
         }
       }
       last_final_[ch] = fin;
+      RecordFinal(ch, fin, NowMs());
       plate_done_[ch].insert(oid);
       int dn; double dc; bool dp;
       plate_vote_.Finalize(ch, oid, &dn, &dc, &dp);  // 투표함 비우기(결과 폐기)
@@ -331,6 +459,12 @@ void SampleComponent::RegisterURI() {
       IAppDispatcher::OpenAPIRegistrar(String("/cand"), GetInstanceName(), methods);
   SendNoReplyEvent("AppDispatcher",
                    static_cast<int32_t>(IAppDispatcher::EEventType::eRegisterCommand), 0, cd1);
+
+  // [EV 판정] /isev?plate=<URL인코딩 번호> → 등록·전기차·목격 여부 JSON (차량365 연동)
+  auto* isev = new ("OpenAPI")
+      IAppDispatcher::OpenAPIRegistrar(String("/isev"), GetInstanceName(), methods);
+  SendNoReplyEvent("AppDispatcher",
+                   static_cast<int32_t>(IAppDispatcher::EEventType::eRegisterCommand), 0, isev);
 
   // [④탐사] /lsdownload?ch=N → /tmp/download/chN 파일 목록
   //   카메라가 oid 당 good-shot 을 여러 장 쓰는지 확인 (여러 장이면 공짜 멀티샘플)
@@ -515,6 +649,49 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
              plate_ocr_ready_ ? "true" : "false", ch, r.text.c_str(), r.confidence, r.source.c_str(),
              last_final_[ch].c_str(),
              r.tiny_text.c_str(), r.tiny_conf, r.tiny_ms, r.total_ms);
+    oas->AddResponseHeader("Content-type", "application/json");
+    oas->SetResponseBody(body, strlen(body));
+  } else if (path == "/isev") {
+    // [EV 판정] 차량365 연동: 번호로 등록·전기차·현장 목격 여부 응답.
+    //   ev       = 등록 DB 의 ",ev" 플래그 (등록원부 fuelType 기반 — 권위 있는 답)
+    //   color_ev = 최근 FINAL 목격 시 판 색이 파랑(bl)이었나 (현장 교차검증용 보조 신호)
+    std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
+    std::string plate;
+    size_t p = qs.find("plate=");
+    if (p != std::string::npos) {
+      size_t e = qs.find('&', p);
+      plate = UrlDecode(qs.substr(p + 6, e == std::string::npos ? std::string::npos : e - (p + 6)));
+    }
+    bool registered = false, ev = false;
+    std::string canon = plate;                 // 매칭된 등록 번호 (ed<=1 교정 포함)
+    if (!plate.empty() && plate_db_ready_) {
+      std::string dbtxt;
+      if (plate_db_.Match(plate, &dbtxt) == 1) {
+        registered = true;
+        canon = dbtxt;
+        ev = plate_db_.IsEv(dbtxt);
+      }
+    }
+    bool seen = false, color_ev = false;
+    std::string seen_color = "?";
+    long age_ms = -1;
+    uint64_t now = NowMs();
+    for (auto it = finals_log_.rbegin(); it != finals_log_.rend(); ++it) {  // 최신부터
+      if (it->text == canon) {
+        seen = true;
+        seen_color = it->color;
+        color_ev = (it->color == "bl");
+        age_ms = (long)(now - it->ms);
+        break;
+      }
+    }
+    char body[320];
+    snprintf(body, sizeof(body),
+             "{\"plate\":\"%s\",\"registered\":%s,\"ev\":%s,"
+             "\"seen\":%s,\"color\":\"%s\",\"color_ev\":%s,\"age_ms\":%ld}",
+             canon.c_str(), registered ? "true" : "false", ev ? "true" : "false",
+             seen ? "true" : "false", seen_color.c_str(), color_ev ? "true" : "false",
+             age_ms);
     oas->AddResponseHeader("Content-type", "application/json");
     oas->SetResponseBody(body, strlen(body));
   } else if (path == "/lsdownload") {
@@ -914,7 +1091,7 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
             }
           }
         }
-        if (trusted) last_final_[ch] = fin;
+        if (trusted) { last_final_[ch] = fin; RecordFinal(ch, fin, now_ms); }
         char m[256];
         snprintf(m, sizeof(m), "%s%s PLATE %s ch%d id%ld -> \"%s\" (best-of-%d, conf %.2f, src=%s%s)%s",
                  Hl(trusted ? cfg::kAnsiFinal : cfg::kAnsiWarn), trusted ? "★" : "?",
