@@ -40,6 +40,16 @@ namespace {
 // 디버그 뷰어 로그 강조: kAnsiLogs=false 면 빈 문자열(색 없음)로 대체.
 inline const char* Hl(const char* code) { return cfg::kAnsiLogs ? code : ""; }
 
+// 판 색 코드 → 사람이 읽는 이름 (EV 판정엔 안 씀 — 데이터 확인용 눈요기).
+//   wh 흰색 · ye 노란(영업용) · gr 연두(친환경 법인) · bl 파랑(전기·수소 개인)
+inline const char* ColorName(const std::string& c) {
+  if (c == "wh") return "white";
+  if (c == "ye") return "yellow";
+  if (c == "gr") return "green";
+  if (c == "bl") return "blue";
+  return "unknown";
+}
+
 // [EV 실조회] ev_cache_ 판정값의 특수 상태 (1=EV, 0=아님 은 EvClient 규약)
 constexpr int kEvNone = -9;     // 캐시에 없음 — 첫 조회 필요
 constexpr int kEvPending = -2;  // 조회 요청됨 — 응답 대기중
@@ -173,31 +183,40 @@ void SampleComponent::EmitEvent(int channel, const std::string& msg) {
 //   하고 그 자리에서 전기차 여부를 판정해 디버그 뷰어에 알린다.
 //   색은 그 채널 마지막 good-shot 판독의 판 색 분류(버스트 승리여도 같은 차의 색).
 //   판정: 등록차는 DB 플래그(등록 시점에 ev.or.kr 저공해 1종 조회로 확정된 ",ev")가
-//   정답, 미등록차는 판 색(bl=전기·수소 파란판)으로 추정. 색은 교차확인용 병기.
+//   정답, 미등록차는 ev.or.kr 실조회로 확정. 판 색은 EV 판정에 쓰지 않고(법인 전기차는
+//   연두색이라 "파랑=EV"가 틀림) 로그에 참고용으로만 병기한다.
 void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_ms) {
   const std::string color = last_plate_ocr_[ch].color;
   finals_log_.push_back({text, color, now_ms});
   while (finals_log_.size() > 64) finals_log_.pop_front();
 
+  const char* pc = color.empty() ? "?" : color.c_str();
+
+  // [눈요기] 이 차를 무슨 색 판으로 봤나 — 판정엔 안 쓰고 데이터 확인용으로만 찍는다.
+  char cm[160];
+  snprintf(cm, sizeof(cm), "%s🎨 COLOR ch%d \"%s\" -> %s (%s)%s",
+           Hl(cfg::kAnsiInfo), ch, text.c_str(), ColorName(color), pc, Hl(cfg::kAnsiReset));
+  EmitEvent(ch, cm);
+
   std::string canon;
   bool registered = plate_db_ready_ && plate_db_.Match(text, &canon) == 1;
-  const char* pc = color.empty() ? "?" : color.c_str();
   char m[320];
 
   if (registered) {  // 등록차 — DB 플래그(등록 시점에 ev.or.kr 로 확정된 값)가 정답
     bool ev = plate_db_.IsEv(canon);
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (DB등록 ev %s, 판색 %s)%s",
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (registered, DB ev=%s, color %s)%s",
              Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
-             ev ? "★전기차★" : "일반차", ev ? "O" : "X", pc, Hl(cfg::kAnsiReset));
+             ev ? "★EV★" : "non-EV", ev ? "Y" : "N", pc, Hl(cfg::kAnsiReset));
     EmitEvent(ch, m);
     return;
   }
 
-  if (!cfg::kEvLiveLookup) {  // 실조회 꺼짐 — 판색(bl) 추정으로 후퇴
-    bool ev = color == "bl";
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (미등록: 색 추정, 판색 %s)%s",
-             Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
-             ev ? "★전기차★" : "일반차", pc, Hl(cfg::kAnsiReset));
+  if (!cfg::kEvLiveLookup) {  // 실조회 꺼짐 — 판정 불가 (색 추정 안 함)
+    //   판 색으로 EV 를 추정하지 않는다: 파란판만 전기차가 아니다. 법인 전기차는
+    //   연두색(친환경 법인판)이라 "파랑=EV" 규칙은 법인차를 통째로 놓친다 (07-30).
+    //   미등록차의 정답은 오직 등록 시점 ev.or.kr 조회. 실조회 꺼진 현장은 판정 보류.
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> unknown (unregistered, lookup off, color %s)%s",
+             Hl(cfg::kAnsiDim), ch, text.c_str(), pc, Hl(cfg::kAnsiReset));
     EmitEvent(ch, m);
     return;
   }
@@ -217,16 +236,16 @@ void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_
   }
   if (cached == kEvNone) {
     ev_client_.Request(ch, text);
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ev.or.kr 실조회중... (판색 %s 참고)%s",
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ev.or.kr live lookup... (color %s)%s",
              Hl(cfg::kAnsiInfo), ch, text.c_str(), pc, Hl(cfg::kAnsiReset));
   } else if (cached == kEvPending) {
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 실조회 응답 대기중...%s",
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> awaiting lookup response...%s",
              Hl(cfg::kAnsiInfo), ch, text.c_str(), Hl(cfg::kAnsiReset));
   } else {
     bool ev = cached == 1;
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (실조회 캐시: %s, 판색 %s)%s",
+    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (lookup cache: %s, color %s)%s",
              Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
-             ev ? "★전기차★" : "일반차", cdetail.c_str(), pc, Hl(cfg::kAnsiReset));
+             ev ? "★EV★" : "non-EV", cdetail.c_str(), pc, Hl(cfg::kAnsiReset));
   }
   EmitEvent(ch, m);
 }
@@ -247,15 +266,15 @@ void SampleComponent::DrainEvResults() {
   for (const auto& r : rs) {
     char m[384];
     if (r.verdict == 1)
-      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ★전기차★ (ev.or.kr 실조회: %s)%s",
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ★EV★ (ev.or.kr lookup: %s)%s",
                Hl(cfg::kAnsiEv), r.ch, r.plate.c_str(), r.detail.c_str(),
                Hl(cfg::kAnsiReset));
     else if (r.verdict == 0)
-      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 일반차 (ev.or.kr 실조회: %s)%s",
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> non-EV (ev.or.kr lookup: %s)%s",
                Hl(cfg::kAnsiDim), r.ch, r.plate.c_str(), r.detail.c_str(),
                Hl(cfg::kAnsiReset));
     else
-      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> 판정불가 (%s) — 다음 확정 때 재시도%s",
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> unknown (%s) — retry on next final%s",
                Hl(cfg::kAnsiWarn), r.ch, r.plate.c_str(), r.detail.c_str(),
                Hl(cfg::kAnsiReset));
     EmitEvent(r.ch, m);
@@ -344,7 +363,7 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     bool conflict = plate_vote_.HasConflict(ch, oid, r.text, cfg::kInstantConflictConf);
     if (r.confidence >= cfg::kInstantFinalConf && conflict) {
       char cm[128];
-      snprintf(cm, sizeof(cm), "  instant hold ch%d id%ld: 버스트 반박 존재 -> 투표행", ch, oid);
+      snprintf(cm, sizeof(cm), "  instant hold ch%d id%ld: burst disagrees -> to vote", ch, oid);
       EmitEvent(ch, cm);
     }
     if (r.confidence >= cfg::kInstantFinalConf && !conflict) {
@@ -653,8 +672,9 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     oas->SetResponseBody(body, strlen(body));
   } else if (path == "/isev") {
     // [EV 판정] 차량365 연동: 번호로 등록·전기차·현장 목격 여부 응답.
-    //   ev       = 등록 DB 의 ",ev" 플래그 (등록원부 fuelType 기반 — 권위 있는 답)
-    //   color_ev = 최근 FINAL 목격 시 판 색이 파랑(bl)이었나 (현장 교차검증용 보조 신호)
+    //   ev    = 등록 DB 의 ",ev" 플래그 (등록 시점 ev.or.kr 조회로 확정 — 권위 있는 답)
+    //   color = 최근 FINAL 목격 시 판 색(wh/ye/gr/bl) — 참고용 원시값. EV 판정엔 쓰지
+    //           않는다: 법인 전기차는 연두색이라 "파랑=EV" 교차확인이 틀린다 (07-30).
     std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
     std::string plate;
     size_t p = qs.find("plate=");
@@ -672,15 +692,14 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
         ev = plate_db_.IsEv(dbtxt);
       }
     }
-    bool seen = false, color_ev = false;
+    bool seen = false;
     std::string seen_color = "?";
     long age_ms = -1;
     uint64_t now = NowMs();
     for (auto it = finals_log_.rbegin(); it != finals_log_.rend(); ++it) {  // 최신부터
       if (it->text == canon) {
         seen = true;
-        seen_color = it->color;
-        color_ev = (it->color == "bl");
+        seen_color = it->color;   // 원시 판 색 (참고용) — EV 판정엔 미사용
         age_ms = (long)(now - it->ms);
         break;
       }
@@ -688,10 +707,9 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     char body[320];
     snprintf(body, sizeof(body),
              "{\"plate\":\"%s\",\"registered\":%s,\"ev\":%s,"
-             "\"seen\":%s,\"color\":\"%s\",\"color_ev\":%s,\"age_ms\":%ld}",
+             "\"seen\":%s,\"color\":\"%s\",\"age_ms\":%ld}",
              canon.c_str(), registered ? "true" : "false", ev ? "true" : "false",
-             seen ? "true" : "false", seen_color.c_str(), color_ev ? "true" : "false",
-             age_ms);
+             seen ? "true" : "false", seen_color.c_str(), age_ms);
     oas->AddResponseHeader("Content-type", "application/json");
     oas->SetResponseBody(body, strlen(body));
   } else if (path == "/lsdownload") {

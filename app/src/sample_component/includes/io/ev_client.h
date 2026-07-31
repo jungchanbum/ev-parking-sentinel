@@ -11,6 +11,8 @@
 #include <thread>
 #include <utility>
 
+#include "config.h"   // kEvLookupUrl (조회 엔드포인트 — 하드코딩 금지, 단일 출처)
+
 // ============================================================================
 // EvClient — 무공해차 통합누리집(ev.or.kr) '내차 저공해 확인' 실조회 클라이언트.
 //   미등록 번호판의 전기차 여부를 카메라가 직접 조회한다 (2026-07-30 실측 확정):
@@ -85,10 +87,10 @@ class EvClient {
         r.verdict = Query(j.plate, &r.detail);
       } catch (const std::exception& e) {
         r.verdict = -1;
-        r.detail = std::string("예외: ") + e.what();
+        r.detail = std::string("exception: ") + e.what();
       } catch (...) {
         r.verdict = -1;
-        r.detail = "알 수 없는 예외";
+        r.detail = "unknown exception";
       }
       if (cb_) cb_(r);
     }
@@ -138,7 +140,7 @@ class EvClient {
   }
 
   static int Query(const std::string& plate, std::string* detail) {
-    const char* kUrl = "https://ev.or.kr/nportal/buySupprt/selectNonpolluCheck.ajax";
+    const char* kUrl = cfg::kEvLookupUrl;   // config.h 단일 출처 (URL 하드코딩 금지)
     std::string body = "selectCarNum=1&searchWord=" + PctEncode(plate);
 
     // 카메라 내장 HTTP 클라이언트 후보를 순서대로 시도. 둘 다 TLS 는 자식
@@ -152,25 +154,25 @@ class EvClient {
     std::string resp, first_err;
     for (const auto& cmd : cmds) {
       if (!Exec(cmd, &resp)) {
-        if (first_err.empty()) first_err = "popen 실패(fork 불가?)";
+        if (first_err.empty()) first_err = "popen failed (no fork?)";
         continue;
       }
       if (resp.find("\"data\"") != std::string::npos) {  // JSON 응답 확보
         if (resp.find("\"data\":null") != std::string::npos) {
-          *detail = "저공해 목록에 없음(내연기관)";
+          *detail = "not in low-emission list (ICE)";
           return 0;
         }
         std::string type = JsonStr(resp, "CAR_TYPE_NM");
-        if (type.empty()) { *detail = "응답 파싱 실패"; return -1; }
+        if (type.empty()) { *detail = "response parse failed"; return -1; }
         *detail = JsonStr(resp, "MAKR_NM") + " " + JsonStr(resp, "CAR_NM") + ", " +
                   JsonStr(resp, "USEFUELNM") + ", " + type;
         return type == "1종" ? 1 : 0;  // 1종=전기·수소, 2종(하이브리드)·3종은 아님
       }
       // JSON 이 안 왔다 — 바이너리 부재("not found")든 통신 실패든 다음 후보로
       if (first_err.empty())
-        first_err = resp.empty() ? "출력 없음" : resp.substr(0, 120);
+        first_err = resp.empty() ? "no output" : resp.substr(0, 120);
     }
-    *detail = "curl/wget 조회 실패: " + first_err;
+    *detail = "curl/wget lookup failed: " + first_err;
     return -1;
   }
 
