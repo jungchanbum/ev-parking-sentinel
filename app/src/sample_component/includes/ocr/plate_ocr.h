@@ -54,16 +54,23 @@ class PlateOcr {
     };
     auto t_all = clk::now();
 
+    // ---- 좌우 반전 보정 ----
+    //   카메라/채널에 따라 크롭이 거울상으로 들어올 수 있다 (2026-08-03 실측: 재부팅 후
+    //   번호판 영상이 좌우 반전된 센서로 잡혀 OCR 이 거울 글자를 읽고 전량 오독).
+    //   kFlipCropH=true 면 판독 직전 원위치로 뒤집는다. 색·후보 전 단계를 한 번에 커버.
+    cv::Mat src = crop_bgr_or_gray;
+    if (cfg::kFlipCropH && !src.empty()) { cv::Mat f; cv::flip(src, f, 1); src = f; }
+
     cv::Mat gray;
-    if (crop_bgr_or_gray.channels() == 3)
-      cv::cvtColor(crop_bgr_or_gray, gray, cv::COLOR_BGR2GRAY);
+    if (src.channels() == 3)
+      cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
     else
-      gray = crop_bgr_or_gray;
+      gray = src;
 
     PlateOcrResult r;
 
     // ---- 번호판 배경색 분류 (밝은 픽셀 = 판 배경의 평균색) → 색-한글 검증에 사용 ----
-    r.color = ClassifyPlateColor(crop_bgr_or_gray, gray);
+    r.color = ClassifyPlateColor(src, gray);
     // "유효" = 포맷 OK + 색-한글 모순 없음 (노랑판만 아바사자배, 그 외 판에선 금지)
     auto validc = [&](const std::string& t) {
       return plate_decode::ValidPlateFormat(t) &&
@@ -85,6 +92,9 @@ class PlateOcr {
         best_valid = v; best_conf = conf; best_txt = txt; best_crop = cands[i];
         r.win_cand = cnames[i];
       }
+      // [캐스케이드] 유효 판독이 문턱 넘으면 나머지 후보 생략 (good-shot 만, 버스트 제외).
+      //   깨끗한 판은 첫 후보에서 끝나 4회 OCR → 1~2회. 지터·조도도 conf 높아 자동 스킵.
+      if (cfg::kCascade && !light && v && conf >= cfg::kCascadeExit) break;
     }
     r.tiny_ms = ms_since(t0);
     r.tiny_text = best_txt; r.tiny_conf = best_conf < 0 ? 0.0 : best_conf;
@@ -150,6 +160,24 @@ class PlateOcr {
         r.text = t2; r.confidence = std::min(c2, cfg::kRescueConfCap);
         r.source = v2 ? "exposure(valid)" : "exposure";
         best_crop = fixed;   // 디노이즈 구조 단계도 보정본 기준으로
+      }
+    }
+
+    // ---- 2단계a-2: 디블러(언샤프) — 초점 흐림(디포커스) 크롭 전용 (conf<0.95 만) ----
+    //   무거운 구조체인(디노이즈)과 별개의 가벼운 언샤프 1회(~2ms). 노이즈가 아니라
+    //   디포커스 블러일 때 글자 경계를 세워 판독을 개선한다 (08-03 흐린 크롭 대응).
+    //   여전히 가공이라 conf 0.94 캡 — 단독 FINAL 불가, DB 그물·투표를 도울 뿐.
+    if (!light && cfg::kDeblurSoft && r.confidence < cfg::kFinalConfFloor && best_crop.cols > 32) {
+      cv::Mat blur_, sharp_;
+      cv::GaussianBlur(best_crop, blur_, cv::Size(0, 0), 1.2);
+      cv::addWeighted(best_crop, 1.8, blur_, -0.8, 0, sharp_);  // 강한 언샤프(디포커스용)
+      std::string td; double cd;
+      RunKr(sharp_, &td, &cd);
+      bool vd = validc(td), bv = validc(r.text);
+      if ((vd && !bv) || (vd == bv && cd > r.confidence)) {
+        r.text = td; r.confidence = std::min(cd, cfg::kRescueConfCap);
+        r.source = vd ? "deblur(valid)" : "deblur";
+        best_crop = sharp_;
       }
     }
 
@@ -246,7 +274,12 @@ class PlateOcr {
       if (names) names->push_back(n);
     };
     add(gray, "orig");
+    const int W = gray.cols, H = gray.rows;
 
+    // [경량화] 밝은영역 박스(box0m0) 후보 생성 — Otsu+모폴로지+윤곽선(무거움).
+    //   08-03 우승 통계상 box0m0 는 거의 안 이기는데 매 크롭마다 이 전처리를 돌린다.
+    //   kUseBoxCand=false 면 통째로 건너뛰어 후보 4→3 + 윤곽선 검출 제거.
+    if (cfg::kUseBoxCand) {
     // 밝은영역(흰 번호판) 후보: Otsu 이진화 → 가로로 닫기 → 번호판 비율 사각형
     cv::Mat g, th;
     cv::GaussianBlur(gray, g, cv::Size(5, 5), 0);
@@ -255,7 +288,6 @@ class PlateOcr {
                      cv::getStructuringElement(cv::MORPH_RECT, cv::Size(17, 5)));
     std::vector<std::vector<cv::Point>> cnts;
     cv::findContours(th, cnts, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    const int W = gray.cols, H = gray.rows;
     std::vector<std::pair<int, cv::Rect>> boxes;  // (area, rect)
     for (const auto& c : cnts) {
       cv::Rect b = cv::boundingRect(c);
@@ -283,6 +315,7 @@ class PlateOcr {
           add(gray(rc), "box" + std::to_string(i) + "m" + std::to_string(mi));
       }
     }
+    }  // if (kUseBoxCand)
 
     // 중앙크롭 (번호판이 크롭 중앙에 있는 경향) — light 는 1종만.
     // 구 ctr1(55%×35%, 과소 크롭)은 1승(그마저 오독)으로 사형 — ctr1 은 이제 85%×60%.

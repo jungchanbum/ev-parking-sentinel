@@ -37,13 +37,24 @@ constexpr bool   kEnhanceBlur   = false;
 constexpr double kUnsharpAmount = 1.2;    // 강도 0.5~2.0
 constexpr double kUnsharpSigma  = 1.5;    // 블러 반경 px
 
-// OCR 최소 크롭 폭(px): 이보다 작으면(=차가 너무 멀면) 인식 스킵.
-//   실측: 144·272px 크롭은 환각(conf 0.6~0.9 쓰레기), 328px+ 는 정상 판독.
-constexpr int kMinOcrCropWidth = 300;
-// 세로 하한(07-29 실측): 높이 136~168 납작 크롭은 글자가 ~15px 라 전량 쓰레기(conf
-// 0.6~0.9 환각 → HOLD 소음의 60%), 184px 이상은 전부 정상 판독. 경계 176 에 컷.
-// 걸리는 건 대부분 같은 차의 부스러기 중복 트랙이라 본 트랙 FINAL 로 손실 없음.
-constexpr int kMinOcrCropHeight = 176;
+// OCR 최소 크롭 폭·세로 하한(px): 이보다 작으면 인식 스킵.
+//   08-03 재조정: 수동 초점 도입 후 작은 크롭도 선명해져 240x160 크롭에서
+//   "36라7833", 384x168 에서 "15노1199" 가 또렷이 읽힘(실측 확인). 기존 300x176
+//   (07-29, 소프트 크롭 기준)은 이제 과해서 읽을 수 있는 판을 버림 → 220x150 으로 완화.
+//   여전히 144px 이하 납작 크롭은 글자가 뭉개져 제외(미검증). 낮춘 만큼 저품질 판독이
+//   늘 수 있으나 0.95 게이트·0.90 버스트 게이트가 오확정을 막음(등록차 DB 회수만 주의).
+// 08-03 최종: 모델 입력이 96px 높이/192px 폭이라, 그보다 작은 크롭은 upscale 이라
+//   정보가 안 늘어남 = 물리적 하한. 실측: 360x120 sharp573 에서 "27머8257" 또렷이 읽힘.
+//   여기에 약간 여유(폭 180/높이 100)를 둔 게 진짜 바닥 — 더 낮추면 upscale 구간.
+//   낮춘 만큼 흐린 저품질도 통과하나 0.95 게이트·DB 그물이 오확정을 막음.
+constexpr int kMinOcrCropWidth = 180;
+constexpr int kMinOcrCropHeight = 100;
+
+// 크롭 좌우 반전 보정: true 면 판독 직전 크롭을 수평으로 뒤집는다.
+//   근본 원인은 카메라(채널/센서 플립)지만, 카메라에서 못 끄는 경우의 코드 보정.
+//   2026-08-03 실측: 재부팅 후 번호판 영상이 좌우 반전된 채널로 잡혀 OCR 전량 오독
+//   (cap_ 크롭이 거울상). 정상(비반전) 채널로 돌아가면 반드시 false 로.
+constexpr bool kFlipCropH = true;
 
 // ===== 번호판 숫자 인식(OCR) 모델 경로 =====
 //   PC(ocr_lab)에서 검증한 tinyLPR 단독 (Multi-line 은 기여 0 실측으로 제거 — 경량화).
@@ -82,6 +93,12 @@ constexpr int kStackMinFrames = 3;   // 최소 이 장수 이상 모였을 때�
 //   단독으론 FINAL 을 못 만들고 산출물 대부분이 쓰레기 실측 → 완전 오프.
 //   이 구간이 살리던 저화질 판은 DB 최근접 매칭 레이어가 이어받는다.
 constexpr bool kRescueChain = false;
+
+// ===== 디블러(언샤프) — 흐린(디포커스) 크롭 전용 =====
+//   구조체인과 별개의 가벼운 언샤프 1회(~2ms, 디노이즈 없음). conf<0.95 인 흐린 판독에만
+//   발동해 글자 경계를 세운다. 캡 0.94 라 단독 FINAL 불가 — DB 그물·투표 보조용.
+//   08-03: 초점 흐림 크롭(sharp<300)에서 판독 개선 시도. 오독 늘면 false 로.
+constexpr bool kDeblurSoft = true;
 
 // ===== 2단계 디노이즈 재판독 =====
 //   광학 TTA 16종 중 유일하게 실측 이득이 있던 변형(fastNlMeans, PC +3%p).
@@ -126,6 +143,19 @@ constexpr double kGoodshotSharpMin = 10.0;
 //   내려 "가공은 단독으로 게이트를 못 넘는다" 원칙 유지.
 constexpr double kFinalConfFloor = 0.95;
 constexpr double kRescueConfCap  = 0.94;   // 가공 결과 conf 상한 — 게이트보다 항상 아래
+
+// ===== 후보 캐스케이드 (연산 절감) =====
+//   good-shot 판독 시 후보 크롭을 순서대로(orig→box0m0→ctr0→ctr1) 읽다가, 유효(포맷+색)
+//   판독이 이 값 이상이면 즉시 멈춘다 — 나머지 후보·지터·조도 전부 스킵. 깨끗한 판은
+//   4회 OCR → 1~2회로 줆. 봉인 이력(07-29): 0.99 조기종료는 orig 0.99 오독을 ctr 정답이
+//   못 뒤집는 사고가 있었음 → 재도전 조건: 수동초점+정상방향으로 크롭 품질이 오른 지금,
+//   문턱을 실측으로 검증. 하나라도 오확정 나오면 0.995 로 조이거나 kCascade=false 로 끈다.
+constexpr bool   kCascade     = false;  // 롤백(08-03): 0.99 조기종료가 오독 증가시킴
+constexpr double kCascadeExit = 0.99;   // (미사용) 이 conf 이상이면 남은 후보 생략
+
+// box0m0 후보(Otsu+윤곽선). 우승 횟수는 적지만 소프트 크롭을 건지는 rescue 역할이라
+//   끄면 HOLD 가 늘어 되돌림(08-03 실측). 우승통계만 보고 제거하면 안 됨.
+constexpr bool   kUseBoxCand  = true;
 
 // ===== good-shot 즉시확정 =====
 //   good-shot 원본 판독(가공 아님)이 이 값 이상이면 개표를 기다리지 않고 그 자리에서
