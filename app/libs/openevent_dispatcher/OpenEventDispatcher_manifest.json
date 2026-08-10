@@ -1,0 +1,5 @@
+{
+	"LibraryFileName" : "libopenevent_dispatcher.so",
+	"Version" : "1.0.0",
+	"DynamicLoadable" : true
+}

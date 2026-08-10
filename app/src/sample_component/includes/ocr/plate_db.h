@@ -68,9 +68,37 @@ class PlateDb {
     return r;
   }
 
+  // [tier-2: 2글자 회수] 같은 길이에서 치환 ≤2 인 등록 번호가 정확히 하나면 그 번호.
+  //   저해상 리그의 표준 오독이 혼동쌍(0↔9, 5↔6, 1↔7, 허↔머) 2글자 패턴 (08-06 실측:
+  //   90머5755→96머5715, 40허5578→49허5678 — 전부 ed2 라 tier-1 그물 밖이었음).
+  //   안전장치: 후보가 2개 이상이면 애매 → 불개입 (반환 2). 삽입/삭제는 안 봄 (길이 동일만).
+  int MatchLoose(const std::string& text, std::string* out) const {
+    std::vector<uint32_t> t = Decode(text);
+    int r = MatchLooseCp(t, out);
+    if (r == 0 && t.size() >= 3 && IsHangul(t[0]) && IsHangul(t[1]) && IsDigit(t[2]))
+      r = MatchLooseCp(std::vector<uint32_t>(t.begin() + 2, t.end()), out);
+    return r;
+  }
+
  private:
   static bool IsHangul(uint32_t cp) { return cp >= 0xAC00 && cp <= 0xD7A3; }
   static bool IsDigit(uint32_t cp) { return cp >= '0' && cp <= '9'; }
+
+  int MatchLooseCp(const std::vector<uint32_t>& t, std::string* out) const {
+    int found = 0;
+    for (size_t i = 0; i < plates_.size(); i++) {
+      const auto& p = plates_[i];
+      if (p.size() != t.size()) continue;    // 길이 다르면 제외 (치환만 인정)
+      int diff = 0;
+      for (size_t k = 0; k < t.size() && diff <= 2; k++)
+        if (t[k] != p[k]) ++diff;
+      if (diff <= 2) {
+        if (found == 0) *out = raw_[i];
+        found++;
+      }
+    }
+    return found == 0 ? 0 : (found == 1 ? 1 : 2);
+  }
 
   int MatchCp(const std::vector<uint32_t>& t, std::string* out) const {
     int found = 0;

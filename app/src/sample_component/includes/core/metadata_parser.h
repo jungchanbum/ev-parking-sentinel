@@ -99,6 +99,24 @@ class Parser {
 
       // 번호판: 부모(차량) id + 카메라 크롭(ImageRef) 경로 수집
       if (is_plate) {
+        // good-shot 기록은 본체 bbox 가 0,0,0,0 이고 실좌표는 <tt:ImageRefShape> 에
+        // 있다 (08-06 실측: 재부팅 후 WiseAI 가 이 형태로만 번호판을 냄 → 좌표 유실로
+        // "plate pos (0.00,0.00)" 유령·구역판정 불가). 본체가 무효면 그쪽을 쓴다.
+        if (nr <= nl || nb <= nt) {
+          size_t irs = xml.find("<tt:ImageRefShape>", id_start);
+          if (irs != std::string::npos && irs < obj_end) {
+            double l2 = FindAttr(xml, irs, obj_end, "left=\"", 0);
+            double t2 = FindAttr(xml, irs, obj_end, "top=\"", 0);
+            double r2 = FindAttr(xml, irs, obj_end, "right=\"", 0);
+            double b2 = FindAttr(xml, irs, obj_end, "bottom=\"", 0);
+            if (r2 > l2 && b2 > t2) {
+              nl = (float)std::min(1.0, std::max(0.0, l2 / fw));
+              nt = (float)std::min(1.0, std::max(0.0, t2 / fh));
+              nr = (float)std::min(1.0, std::max(0.0, r2 / fw));
+              nb = (float)std::min(1.0, std::max(0.0, b2 / fh));
+            }
+          }
+        }
         Object ob;
         ob.id = id;
         ob.cls = kPlate;

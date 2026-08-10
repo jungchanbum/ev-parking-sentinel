@@ -20,6 +20,11 @@
             "RemoteComponentName": "OpenAPIDispatcher"
         },
         {
+            "LocalComponentName": "Stub::Dispatcher::Eventstatus",
+            "ContainerName": "System",
+            "RemoteComponentName": "EventstatusCGIDispatcher"
+        },
+        {
             "LocalComponentName": "2009004",
             "ContainerName": "System",
             "RemoteComponentName": "2009004"

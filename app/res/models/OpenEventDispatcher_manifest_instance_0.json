@@ -1,0 +1,20 @@
+{
+	"LibraryFileName": "libopenevent_dispatcher.so",
+	"Instance": {
+		"InstanceName": "OpenEventDispatcher",
+		"SchedulerName": "EComponents::eScheduler1",
+		"ReceiverNames": [
+			"Stub::Dispatcher::Eventstatus",
+			"SampleComponent"
+		],
+		"SourceNames": [
+			{
+				"Source": "Stub::Dispatcher::Eventstatus",
+				"GroupName": "OpenSDK::Common::EventSource"
+			}
+		],
+		"Channel": 0,
+		"ModelPath": "",
+		"SettingPath": ""
+	}
+}

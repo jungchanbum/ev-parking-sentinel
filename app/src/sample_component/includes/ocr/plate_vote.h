@@ -20,13 +20,19 @@
 // ============================================================================
 class PlateVote {
  public:
-  // 이 oid 에 지금 버스트 샘플을 시도해도 되는가 (웜업 1초 + 스로틀 + 상한 3개).
-  bool CanSample(int ch, long oid, uint64_t now_ms) {
+  // 이 oid 에 지금 버스트 샘플을 시도해도 되는가.
+  //   일반: 웜업 1초 + 스로틀 + 상한 3개 (지나가는 차 — 비용 절약).
+  //   zone=true (주차구역 안 번호판): 웜업 없음·상한 12·스로틀 300ms — 3초 대기 동안
+  //   차가 멈춰 제일 잘 보이는 순간이므로 연사로 존나 읽는다.
+  bool CanSample(int ch, long oid, uint64_t now_ms, bool zone = false) {
     Entry& e = map_[Key(ch, oid)];
     if (e.first_ms == 0) e.first_ms = now_ms;                     // 첫 감지 시각
-    if (now_ms - e.first_ms < cfg::kBurstWarmupMs) return false;  // 웜업: 먼 차 스킵
-    if ((int)e.samples.size() >= cfg::kBurstMax) return false;
-    if (e.last_ms != 0 && now_ms - e.last_ms < cfg::kBurstThrottleMs) return false;
+    const int max_n = zone ? 12 : cfg::kBurstMax;
+    const uint64_t warmup = zone ? 0 : cfg::kBurstWarmupMs;
+    const uint64_t throttle = zone ? 300 : cfg::kBurstThrottleMs;
+    if (now_ms - e.first_ms < warmup) return false;               // 웜업: 먼 차 스킵
+    if ((int)e.samples.size() >= max_n) return false;
+    if (e.last_ms != 0 && now_ms - e.last_ms < throttle) return false;
     e.last_ms = now_ms;
     return true;
   }
@@ -67,11 +73,33 @@ class PlateVote {
   //   *n=샘플수, *conf=승자 점수 근거 conf, *from_primary=승자 그룹에 good-shot 포함 여부.
   //   확정 보류("" 반환): 샘플 없음 / 유효포맷 없음 / 버스트만인데 1개뿐.
   std::string Finalize(int ch, long oid, int* n, double* conf, bool* from_primary) {
-    *n = 0; *conf = 0.0; *from_primary = false;
     auto it = map_.find(Key(ch, oid));
-    if (it == map_.end()) return "";
+    if (it == map_.end()) { *n = 0; *conf = 0.0; *from_primary = false; return ""; }
     Entry e = it->second;
     map_.erase(it);
+    return Judge(e, n, conf, from_primary);
+  }
+
+  // [주차 조기개표] Finalize 와 같은 심사를 투표함을 비우지 않고 수행 — 신뢰도가
+  //   아직 부족하면 호출측이 그냥 넘어가고 샘플이 계속 쌓인다 (추적 종료 불필요).
+  std::string Peek(int ch, long oid, int* n, double* conf, bool* from_primary) const {
+    auto it = map_.find(Key(ch, oid));
+    if (it == map_.end()) { *n = 0; *conf = 0.0; *from_primary = false; return ""; }
+    return Judge(it->second, n, conf, from_primary);
+  }
+
+ private:
+  struct Sample { std::string text; double conf; bool primary; };
+  struct Entry {
+    std::vector<Sample> samples;
+    uint64_t first_ms = 0;   // 첫 샘플 시도 시각 ≒ 번호판 첫 감지 (웜업 기준점)
+    uint64_t last_ms = 0;
+    bool has_primary = false;
+  };
+
+  // 챔피언십 본심사 (Finalize/Peek 공용) — 규칙은 기존 Finalize 그대로.
+  static std::string Judge(const Entry& e, int* n, double* conf, bool* from_primary) {
+    *n = 0; *conf = 0.0; *from_primary = false;
     *n = (int)e.samples.size();
     if (e.samples.empty()) return "";
     if (!e.has_primary && *n < 2) return "";   // 버스트 1개만으론 확정 안 함(조기확정 방지)
@@ -136,14 +164,6 @@ class PlateVote {
     return best_text;
   }
 
- private:
-  struct Sample { std::string text; double conf; bool primary; };
-  struct Entry {
-    std::vector<Sample> samples;
-    uint64_t first_ms = 0;   // 첫 샘플 시도 시각 ≒ 번호판 첫 감지 (웜업 기준점)
-    uint64_t last_ms = 0;
-    bool has_primary = false;
-  };
   // 텍스트에서 숫자만 추출 — "한글만 다른 접전" 판별용 (27하8257 vs 27머8257 → "278257" 동일)
   static std::string DigitsOf(const std::string& t) {
     std::string d;

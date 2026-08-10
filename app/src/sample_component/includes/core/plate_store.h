@@ -61,6 +61,15 @@ class PlateStore {
     return "";
   }
 
+  // [good-shot 재요청 효과] 중복제거 기억을 지운다. WiseAI 는 객체당 good-shot 을
+  //   한 번만 "알려"주지만 ImageRef 경로는 메타데이터에 계속 실려온다 — 이 기억을
+  //   지우면 같은 크롭을 새것처럼 다시 받아 판독을 처음부터 재시작한다 (재요청 API 없음).
+  void ForgetRefs(int ch) {
+    if (ch < 0 || ch >= cfg::kChannels) return;
+    last_ref_[ch].clear();
+    last_oid_[ch] = 0;
+  }
+
   int total() const { return total_; }
   int read_fail() const { return read_fail_; }
   const int* saved_ch() const { return saved_ch_; }

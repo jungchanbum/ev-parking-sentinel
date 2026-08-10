@@ -11,6 +11,10 @@ set(APP_STORAGE ${CMAKE_HOME_DIRECTORY}/storage)
 file(MAKE_DIRECTORY ${APP_LIBS})
 file(COPY ${APP_DISPATCHER_SOURCE_DIR} DESTINATION ${APP_LIBS})
 
+# [EventStatus] openevent_dispatcher — 앱 이벤트를 카메라 SUNAPI eventstatus.cgi 로
+#   중계하는 스텁 브리지 (SDK AppSupportPackage 제공 .so, dynamic_event 샘플 방식)
+file(COPY ${APP_SUPPORT_PACKAGE}/openevent_dispatcher DESTINATION ${APP_LIBS})
+
 # Create res, res/models, res, res/settings
 file(MAKE_DIRECTORY ${APP_RES})
 file(MAKE_DIRECTORY ${APP_RES}/models)

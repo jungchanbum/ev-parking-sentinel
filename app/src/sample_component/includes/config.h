@@ -23,6 +23,19 @@ constexpr const char* kTmpPrefix = "/tmp";
 // 앱이 결과물(크롭·스냅샷)을 저장하는 폴더 (실행 위치 기준 상대경로)
 constexpr const char* kStorageDir = "../storage";
 
+// ===== 주차구역(ParkingZone) 판정 =====
+//   Pi 가 4점 구역 등록 → 차가 그 구역 면적 kParkOverlapFrac 이상 겹치고 정지한 채
+//   kParkDwellMs 유지 → "주차". 점유차가 빠지면 kParkLeaveGraceMs 후 디폴트 리셋.
+constexpr double kParkOverlapFrac = 0.65;   // bbox 면적의 65% 이상 구역 안 (진입 판정 겸용)
+constexpr uint64_t kParkDwellMs = 2000;     // 정지+겹침 2초 유지 → 주차 확정
+constexpr uint64_t kParkLeaveGraceMs = 2000;  // 부재 이만큼 지속 → "부재 의심" (출차 확정은
+                                              //   스냅샷 육안검증 3연속 빈칸이 내린다)
+constexpr const char* kParkFile = "../storage/parking_zones.txt";  // 구역 영속화
+// FINAL 이 주차확정(3초)보다 먼저 끝나면 배정이 비켜간다 (진입하며 읽히고 그다음 주차).
+//   1순위는 명찰 직결(번호판 parent 차량 oid)이고, 이건 추적이 끊겼을 때의 최후 폴백 —
+//   배정 즉시 1회용 소모되며, 창을 짧게 둬서 남의 번호가 꽂힐 확률을 줄인다.
+constexpr uint64_t kParkPlateBacklogMs = 30000;   // 최근 FINAL 소급 배정 윈도우 (30초)
+
 // ===== 번호판 저장 정책 =====
 //   WiseAI 가 best-shot 을 1장 골라 주므로 앱은 선명도 측정/거부/비교 없이 그대로 저장.
 //   (샤프니스 floor·best-shot 로직 제거됨 — 낮아도 전부 저장)
@@ -45,10 +58,11 @@ constexpr double kUnsharpSigma  = 1.5;    // 블러 반경 px
 //   늘 수 있으나 0.95 게이트·0.90 버스트 게이트가 오확정을 막음(등록차 DB 회수만 주의).
 // 08-03 최종: 모델 입력이 96px 높이/192px 폭이라, 그보다 작은 크롭은 upscale 이라
 //   정보가 안 늘어남 = 물리적 하한. 실측: 360x120 sharp573 에서 "27머8257" 또렷이 읽힘.
-//   여기에 약간 여유(폭 180/높이 100)를 둔 게 진짜 바닥 — 더 낮추면 upscale 구간.
-//   낮춘 만큼 흐린 저품질도 통과하나 0.95 게이트·DB 그물이 오확정을 막음.
-constexpr int kMinOcrCropWidth = 180;
-constexpr int kMinOcrCropHeight = 100;
+// 08-04 재완화: 주차 리그에서 카메라 ImageRef 크롭이 88~176px 폭으로 와서 전량 스킵
+//   → 같은 판을 버스트(123x110)는 conf 0.98 로 잘 읽음(실측). upscale 구간이어도
+//   시도는 하게 풀고, 오확정은 0.95 게이트·버스트 캡·DB 그물이 막는다.
+constexpr int kMinOcrCropWidth = 80;
+constexpr int kMinOcrCropHeight = 60;
 
 // 크롭 좌우 반전 보정: true 면 판독 직전 크롭을 수평으로 뒤집는다.
 //   근본 원인은 카메라(채널/센서 플립)지만, 카메라에서 못 끄는 경우의 코드 보정.

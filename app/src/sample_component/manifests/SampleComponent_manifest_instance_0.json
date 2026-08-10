@@ -5,12 +5,17 @@
     "SchedulerName": "SampleComponentScheduler",
     "ReceiverNames": [
       "AppDispatcher",
-      "OpenPlatform"
+      "OpenPlatform",
+      "OpenEventDispatcher"
     ],
     "SourceNames": [
       {
         "Source": "MetadataManager_{Ch}",
         "GroupName": "Metadata::OpenApp"
+      },
+      {
+        "Source": "OpenEventDispatcher",
+        "GroupName": "OpenSDK::Common::EventSource"
       },
       {
         "Source": "OpenPlatform",
