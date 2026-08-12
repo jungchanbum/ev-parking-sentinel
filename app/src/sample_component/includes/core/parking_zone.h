@@ -237,6 +237,41 @@ class ParkingZone {
         if (Cover(v, s.poly) >= TOverlap()) { attn_[ch] = true; break; }
       if (attn_[ch]) break;
     }
+    // [판 증거 귀속 08-12] 번호판 중심점 → 소속 칸 1개 배타 결정.
+    //   배경: 차량 미감지 차(토이카 등 — WiseAI 가 차로 분류 못 함)는 판이 유일한
+    //   점유 증거인데, 기존 InPoly 강짜는 "구역을 판보다 작게 그린" 현실에서 증거를
+    //   전멸시켰다 (판 x=0.66 vs 폴리곤 끝 0.648 실측 — 후보·유지 불인정 + 306행
+    //   "경계 밖 목격=이탈" 오발까지). 판독 게이트·배정 폴백과 같은 반경(burst_margin)
+    //   의 확장 bbox 안이면 증거로 인정하되, 옆 칸 판 도둑질 방지로 "가장 가까운 칸
+    //   하나"에만 귀속시킨다 (칸 2개가 붙어 있어도 각자 자기 판만 가진다).
+    std::map<long, const Space*> pclaim;
+    if (plate_pts) {
+      const double fm = tune_ ? tune_->burst_margin : 0.35;
+      for (const auto& pp : *plate_pts) {
+        const Space* best_s = nullptr;
+        double best_d = 1e18;
+        for (const auto& s : spaces_) {
+          if (s.channel != ch || s.poly.size() < 3) continue;
+          double l = 1e9, t = 1e9, r = -1e9, b = -1e9;
+          for (const auto& p : s.poly) {
+            if (p.x < l) l = p.x;
+            if (p.y < t) t = p.y;
+            if (p.x > r) r = p.x;
+            if (p.y > b) b = p.y;
+          }
+          double mx = (r - l) * fm, my = (b - t) * fm;
+          if (pp.x < l - mx || pp.x > r + mx || pp.y < t - my || pp.y > b + my) continue;
+          double cx = (l + r) / 2, cy = (t + b) / 2;
+          double d = (pp.x - cx) * (pp.x - cx) + (pp.y - cy) * (pp.y - cy);
+          if (d < best_d) { best_d = d; best_s = &s; }
+        }
+        if (best_s) pclaim[pp.oid] = best_s;
+      }
+    }
+    auto claimed = [&pclaim](long oid, const Space& s) {
+      auto it = pclaim.find(oid);
+      return it != pclaim.end() && it->second == &s;
+    };
     for (auto& s : spaces_) {
       if (s.channel != ch) continue;
 
@@ -255,7 +290,7 @@ class ParkingZone {
         //   아예 안 담는다 — 새 차의 새 id 는 즉시 통과 (시간 차단 폐지, 08-06).
         if (best == 0 && plate_pts)
           for (const auto& pp : *plate_pts)
-            if (InPoly(pp.x, pp.y, s.poly)) { best = pp.oid; bestov = -1.0; break; }
+            if (claimed(pp.oid, s)) { best = pp.oid; bestov = -1.0; break; }
         if (best == 0) {
           // [깜빡임 흡수] 감지가 프레임 단위로 끊겨도 3초까지는 카운트다운 유지
           //   (정지 장면은 번호판 감지가 수 초 간격 — 1.5초로는 취소↔재시작 무한반복
@@ -303,7 +338,9 @@ class ParkingZone {
             if (v.oid == s.occ_oid && Cover(v, s.poly) <= TExitCover()) { moved_out = true; break; }
           if (!moved_out && plate_pts)
             for (const auto& pp : *plate_pts)
-              if (pp.oid == s.occ_oid && !InPoly(pp.x, pp.y, s.poly)) { moved_out = true; break; }
+              // 점유차의 판이 "이 칸 귀속이 아닌 곳"에서 목격 — 확장 bbox 를 벗어났거나
+              //   옆 칸으로 넘어간 것만 이탈. (구 InPoly: 경계 지터로 즉시출차 오발)
+              if (pp.oid == s.occ_oid && !claimed(pp.oid, s)) { moved_out = true; break; }
         }
         if (moved_out) {
           if (log) log->push_back("🅿️ LEFT " + s.id + " — 90% 이탈, 즉시 출차");
@@ -324,9 +361,12 @@ class ParkingZone {
           if (v.stationary && Cover(v, s.poly) >= 0.5) { still = true; s.occ_oid = v.oid; break; }
         if (!still && plate_pts)
           for (const auto& pp : *plate_pts)
-            if (InPoly(pp.x, pp.y, s.poly)) { still = true; break; }
+            if (claimed(pp.oid, s)) { still = true; break; }
         if (still) { s.evidence_ms = now_ms; s.miss_checks = 0; }
-        if (still || now_ms - s.evidence_ms <= 2000) s.leave_since_ms = 0;
+        // [08-12] 깜빡임 흡수창을 grace 와 연동(상한 2s) — 출차→빈칸 체감을 빠르게.
+        //   grace 를 낮춰 빠른 출차를 원할 때 고정 2s 가 바닥이 되지 않게 한다.
+        uint64_t hold = TGrace() < 2000 ? TGrace() : 2000;
+        if (still || now_ms - s.evidence_ms <= hold) s.leave_since_ms = 0;
         else if (s.leave_since_ms == 0) s.leave_since_ms = now_ms;
       }
     }
@@ -368,7 +408,13 @@ class ParkingZone {
           if (p.x > r) r = p.x;
           if (p.y > b) b = p.y;
         }
-        double mx = (r - l) * 0.20, my = (b - t) * 0.20;
+        // [08-12] 폴백 반경 = 판독 게이트(burst_margin, 기본 0.35)와 일치.
+        //   기존 0.20 은 "읽으라고 해놓고(35%) 배정은 거부(20%)"하는 모순 구간을
+        //   만들었다 — 판이 칸 bbox+20~35% 에 걸치면 FINAL 이 무한 재발급되며
+        //   영영 안 꽂히는 루프 실측 (342버6986, 판 x=0.66 vs 한계 0.6606).
+        //   오배정 방역(모니터 건너편 번호)은 이 반경 밖 폐기가 그대로 담당한다.
+        double fm = tune_ ? tune_->burst_margin : 0.35;
+        double mx = (r - l) * fm, my = (b - t) * fm;
         if (x >= l - mx && x <= r + mx && y >= t - my && y <= b + my) { hit = &s; break; }
       }
     if (!hit) return "";
