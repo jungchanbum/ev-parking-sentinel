@@ -363,6 +363,10 @@
     ['presence_period_ms', '육안검증 주기 ms',  '검사 간격 (1500)'],
     ['presence_conf',      '육안검증 conf',     '판 잔존 인정 하한 (0.60)'],
     ['burst_margin',       '버스트 사거리',     '칸 bbox 확장 비율 (0.35)'],
+    ['goodshot_grace_ms',  '굿샷 우선 ms',      '이만큼 버스트 보류·굿샷 우선 (2500) · 0=끔'],
+    ['best_frame_mode',    '베스트프레임 1=on', '진입~주차 최고 프레임 1장만 OCR · 0=매프레임 합의'],
+    ['best_min_sharp',     '최소 선명도',       '이 미만 크롭은 OCR 제외 (600) · 블러 컷 · 0=끔'],
+    ['best_min_aspect',    '최소 가로비율',     '판 아닌 오크롭(로고·배경) 컷 (2.0)'],
   ];
   const tuneGrid = document.getElementById('tuneGrid');
   const tuneMsg = document.getElementById('tuneMsg');

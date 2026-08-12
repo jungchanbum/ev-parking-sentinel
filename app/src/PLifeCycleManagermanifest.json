@@ -1,5 +1,5 @@
 {
-    "SkeletonPortNumber": "auto",
+    "SkeletonPortNumber": 8590,
     "ContainerName": "object_detect",
     "AcceptLocalOnly": false,
     "SchedulerNames": [

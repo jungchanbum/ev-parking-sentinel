@@ -77,13 +77,27 @@ class ParkingZone {
 
   // 4점 추가. flip=true 면 좌우반전(x→1-x)해서 저장 (Pi 표시좌표용). HTML 오버레이는
   //   판정좌표계에서 직접 찍으므로 flip=false. 반환: 부여된 ID. 실패 시 빈 문자열.
-  std::string Add(int ch, const std::vector<Pt>& pts, bool flip = true) {
+  //   want_id: 클라이언트 지정 ID (08-10 — "수정 = 같은 ID로 삭제→재추가" 지원).
+  //   비면 자동부여(chN-MM). 중복 ID 는 실패. chN-MM 꼴이면 자동부여 시퀀스와 동기화.
+  std::string Add(int ch, const std::vector<Pt>& pts, bool flip = true,
+                  const std::string& want_id = "") {
     if (ch < 0 || ch >= cfg::kChannels || pts.size() != 4) return "";
     Space s;
     s.channel = ch;
-    char id[24];
-    snprintf(id, sizeof(id), "ch%d-%02d", ch, ++seq_[ch]);
-    s.id = id;
+    if (!want_id.empty()) {
+      for (const auto& sp : spaces_)
+        if (sp.channel == ch && sp.id == want_id) return "";  // 중복 — 실패
+      s.id = want_id;
+      size_t dash = want_id.find('-');
+      if (dash != std::string::npos) {
+        int mm = atoi(want_id.c_str() + dash + 1);
+        if (mm > seq_[ch]) seq_[ch] = mm;   // 이후 자동부여가 이 번호를 안 밟게
+      }
+    } else {
+      char id[24];
+      snprintf(id, sizeof(id), "ch%d-%02d", ch, ++seq_[ch]);
+      s.id = id;
+    }
     for (const auto& p : pts)
       s.poly.push_back({flip ? 1.0 - p.x : p.x, p.y});   // ★ 좌우반전(거울상 채널)
     spaces_.push_back(s);

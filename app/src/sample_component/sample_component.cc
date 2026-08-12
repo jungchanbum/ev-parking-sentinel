@@ -32,8 +32,8 @@
 #include "io/disk_log_sink.h"           // [4단계] 확장성 증명 — 새 sink (도메인 무수정)
 #include "core/metadata_parser.h"       // [2단계] XML 파싱 격리 (SDK 무관 객체 구조)
 
-// 채널별 상태 배열이 [4]로 하드코딩되어 있으므로, 설정값이 어긋나면 컴파일 실패로 잡는다.
-static_assert(cfg::kChannels == 4, "channel-indexed arrays are sized [4]; keep cfg::kChannels in sync");
+// 채널 상태는 ChState chs_[cfg::kChannels] 하나로 통합 (08-07 리팩터링) — 채널 수는
+// cfg::kChannels 한 곳만 고치면 된다. (ParkingZone/PlateStore 내부 배열은 자체 [4].)
 
 
 namespace {
@@ -207,15 +207,32 @@ void SampleComponent::EmitEvent(int channel, const std::string& msg) {
 //   정답, 미등록차는 ev.or.kr 실조회로 확정. 판 색은 EV 판정에 쓰지 않고(법인 전기차는
 //   연두색이라 "파랑=EV"가 틀림) 로그에 참고용으로만 병기한다.
 void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_ms, long oid) {
-  const std::string color = last_plate_ocr_[ch].color;
+  // [계측] 세션 첫 FINAL 에 사이클 타임라인 요약 1회 — 병목이 어느 구간인지 즉석 판별.
+  //   -1.0 = 그 스탬프가 안 찍힘 (예: 구역 밖 통과 판독).
+  if (C(ch).tr_final_ms == 0) {
+    C(ch).tr_final_ms = now_ms;
+    auto d = [](uint64_t a, uint64_t b) -> double {
+      return (a && b && b >= a) ? (b - a) / 1000.0 : -1.0;
+    };
+    char tm[224];
+    snprintf(tm, sizeof(tm),
+             "⏱ cycle ch%d: entry→parked %.1fs · entry→first-read %.1fs · "
+             "first-read→final %.1fs · entry→final %.1fs",
+             ch, d(C(ch).tr_entry_ms, C(ch).tr_parked_ms),
+             d(C(ch).tr_entry_ms, C(ch).tr_first_read_ms),
+             d(C(ch).tr_first_read_ms, now_ms),
+             d(C(ch).tr_entry_ms, now_ms));
+    EmitEvent(ch, tm);
+  }
+  const std::string color = C(ch).last_plate_ocr.color;
   finals_log_.push_back({text, color, now_ms});
   while (finals_log_.size() > 64) finals_log_.pop_front();
 
   // [주차 위치배정 준비] 이 번호판(oid)의 마지막 중심좌표 — 그 좌표가 든 칸에 배정.
   double px = -1.0, py = -1.0;
   {
-    auto pp = plate_pos_[ch].find(oid);
-    if (pp != plate_pos_[ch].end()) { px = pp->second.first; py = pp->second.second; }
+    auto pp = C(ch).plate_pos.find(oid);
+    if (pp != C(ch).plate_pos.end()) { px = pp->second.first; py = pp->second.second; }
   }
 
   const char* pc = color.empty() ? "?" : color.c_str();
@@ -234,20 +251,26 @@ void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_
   char ev_url[80];
   snprintf(ev_url, sizeof(ev_url), "/opensdk/object_detect/plate?n=%d", plate_store_.last_slot(ch));
 
-  if (registered) {  // 등록차 — DB 플래그(등록 시점에 ev.or.kr 로 확정된 값)가 정답
-    bool ev = plate_db_.IsEv(canon);
-    // [주차] 위치 배정 — 좌표 없으면(-1) AssignAt 폴백이 "번호 없는 진행중 칸"을 잡는다.
-    { std::string pk = parking_.AssignAt(ch, px, py, text, ev ? 1 : 0, "registered", ev_url, now_ms);
-      if (!pk.empty()) EmitEvent(ch, pk); }
-    CheckParkingEvent(ch);               // [EventStatus] 위반 확정 시 통지
-    snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (registered, DB ev=%s, color %s)%s",
-             Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
-             ev ? "★EV★" : "non-EV", ev ? "Y" : "N", pc, Hl(cfg::kAnsiReset));
-    EmitEvent(ch, m);
-    return;
-  }
+  // [08-11 정정] 명부의 역할 분리 — 명부는 "번호 교정(오독 회수)"만 담당하고,
+  //   EV 판정은 등록차든 미등록차든 **항상 ev.or.kr 실조회가 진실**이다. 명부 플래그는
+  //   등록 시점 스냅샷이라 낡을 수 있다(실측: 37보5679 가 어제 null → 오늘 BMW 1종 EV).
+  //   따라서 등록차라고 실조회를 스킵하지 않는다. 실조회가 켜져 있으면 아래 실조회
+  //   경로로 흘려보내고(canon 으로 조회 — 교정된 정번호), 명부 플래그는 실조회 실패 시
+  //   폴백으로만 쓴다. 실조회가 꺼진 현장에서만 명부 플래그가 1차 정답이 된다.
+  // (RecordFinal 의 text 는 이미 db-fix 로 교정된 정번호라 canon 과 동일 — 실조회는 text 로.)
 
-  if (!cfg::kEvLiveLookup) {  // 실조회 꺼짐 — 판정 불가 (색 추정 안 함)
+  if (!cfg::kEvLiveLookup) {  // 실조회 꺼짐 — 명부 있으면 그 플래그, 없으면 판정 불가
+    if (registered) {
+      bool ev = plate_db_.IsEv(canon);
+      { std::string pk = parking_.AssignAt(ch, px, py, text, ev ? 1 : 0, "registered(db)", ev_url, now_ms);
+        if (!pk.empty()) EmitEvent(ch, pk); }
+      CheckParkingEvent(ch);
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> %s (registered, DB ev=%s, lookup off)%s",
+               Hl(ev ? cfg::kAnsiEv : cfg::kAnsiDim), ch, text.c_str(),
+               ev ? "★EV★" : "non-EV", ev ? "Y" : "N", Hl(cfg::kAnsiReset));
+      EmitEvent(ch, m);
+      return;
+    }
     { std::string pk = parking_.AssignAt(ch, px, py, text, -1, "", ev_url, now_ms,
                                          /*replace_ok=*/false);
       if (!pk.empty()) EmitEvent(ch, pk); }  // [주차] 번호만, EV 판정불가 (미등록 — 교체 금지)
@@ -261,7 +284,8 @@ void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_
     return;
   }
 
-  // 미등록차 — 카메라가 ev.or.kr 을 직접 조회. 같은 번호는 캐시로 1회만.
+  // 실조회 켜짐 — 등록·미등록 구분 없이 카메라가 ev.or.kr 을 직접 조회 (진실은 실시간).
+  //   같은 번호는 캐시로 1회만. 등록차도 여기로 온다 (명부 플래그는 폴백일 뿐).
   int cached = kEvNone;
   std::string cdetail;
   {
@@ -308,25 +332,37 @@ void SampleComponent::DrainEvResults() {
     rs.swap(ev_results_);
     for (const auto& r : rs) {
       if (r.verdict >= 0) ev_cache_[r.plate] = {r.verdict, r.detail};
-      else ev_cache_.erase(r.plate);
+      else ev_cache_.erase(r.plate);   // 실패는 캐시 비움 — 등록차 폴백은 아래 루프가 다시 채움
     }
   }
   for (const auto& r : rs) {
+    // [폴백] 실조회 실패(-1)인데 등록차면 명부 플래그를 최후 답으로 쓴다 (통신 장애 대비).
+    int verdict = r.verdict;
+    std::string detail = r.detail;
+    if (verdict < 0 && plate_db_ready_) {
+      std::string canon;
+      if (plate_db_.Match(r.plate, &canon) == 1) {
+        verdict = plate_db_.IsEv(canon) ? 1 : 0;
+        detail = "lookup failed → DB flag fallback";
+        std::lock_guard<std::mutex> lk(ev_mtx_);
+        ev_cache_[r.plate] = {verdict, detail};
+      }
+    }
     // [주차] 실조회 결과가 그 번호로 주차된 구역이 있으면 EV·위반 갱신 (verdict -1 은 미확정).
-    if (r.verdict >= 0)
-      for (const auto& pk : parking_.OnEvResult(r.plate, r.verdict)) EmitEvent(r.ch, pk);
+    if (verdict >= 0)
+      for (const auto& pk : parking_.OnEvResult(r.plate, verdict)) EmitEvent(r.ch, pk);
     char m[384];
-    if (r.verdict == 1)
-      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ★EV★ (ev.or.kr lookup: %s)%s",
-               Hl(cfg::kAnsiEv), r.ch, r.plate.c_str(), r.detail.c_str(),
+    if (verdict == 1)
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> ★EV★ (%s)%s",
+               Hl(cfg::kAnsiEv), r.ch, r.plate.c_str(), detail.c_str(),
                Hl(cfg::kAnsiReset));
-    else if (r.verdict == 0)
-      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> non-EV (ev.or.kr lookup: %s)%s",
-               Hl(cfg::kAnsiDim), r.ch, r.plate.c_str(), r.detail.c_str(),
+    else if (verdict == 0)
+      snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> non-EV (%s)%s",
+               Hl(cfg::kAnsiDim), r.ch, r.plate.c_str(), detail.c_str(),
                Hl(cfg::kAnsiReset));
     else
       snprintf(m, sizeof(m), "%s⚡EV ch%d \"%s\" -> unknown (%s) — retry on next final%s",
-               Hl(cfg::kAnsiWarn), r.ch, r.plate.c_str(), r.detail.c_str(),
+               Hl(cfg::kAnsiWarn), r.ch, r.plate.c_str(), detail.c_str(),
                Hl(cfg::kAnsiReset));
     EmitEvent(r.ch, m);
     CheckParkingEvent(r.ch);  // [EventStatus] 실조회로 위반이 확정/해제됐으면 통지
@@ -613,8 +649,8 @@ bool SampleComponent::CheckParkingStatus(int ch) {
 void SampleComponent::CheckParkingEvent(int ch) {
   CheckParkingStatus(ch);
   bool viol = parking_.ViolationState(ch);
-  if (viol == park_evt_state_[ch]) return;
-  park_evt_state_[ch] = viol;
+  if (viol == C(ch).park_evt_state) return;
+  C(ch).park_evt_state = viol;
   char m[128];
   snprintf(m, sizeof(m), "%s⛔ violation ch%d -> %s (XML violation field)%s",
            Hl(viol ? cfg::kAnsiWarn : cfg::kAnsiDim), ch,
@@ -628,23 +664,28 @@ void SampleComponent::CheckParkingEvent(int ch) {
 //   흰 차 49허5678 출차 후 빨간 차 주차에 49허5678 배정). 채널 단위 전부 비운다.
 void SampleComponent::PurgePlateState(int ch) {
   uint64_t now_g = NowMs();
-  for (auto& kv : plate_seen_[ch]) {
+  for (auto& kv : C(ch).plate_seen) {
     int n; double c; bool p;
     plate_vote_.Finalize(ch, kv.first, &n, &c, &p);  // 투표함 폐기 (결과 버림)
     // [유령 명부] 나간 차의 번호판 id — WiseAI 가 얼어붙은 레코드를 한동안 반복
     //   송신하므로, 이 id들의 번호판 기반 후보만 15초 차단 (새 id 는 즉시 통과 —
     //   "출차 직후 바로 다음 차" 시나리오를 시간 차단으로 막지 않는다. 08-06).
-    ghost_plate_[ch][kv.first] = now_g;
+    C(ch).ghost_plate[kv.first] = now_g;
   }
-  plate_seen_[ch].clear();
-  plate_done_[ch].clear();
-  stack_acc_[ch].clear();
-  plate_pos_[ch].clear();
-  burst_ver_[ch].clear();
-  pending_ocr_slot_[ch] = -1;
-  futile_slot_[ch] = -1;
+  C(ch).plate_seen.clear();
+  C(ch).plate_done.clear();
+  C(ch).stack_acc.clear();
+  C(ch).plate_pos.clear();
+  C(ch).burst_ver.clear();
+  C(ch).pending_ocr_slot = -1;
+  C(ch).futile_slot = -1;
   plate_store_.ForgetRefs(ch);  // 다음 차의 크롭을 깨끗한 상태에서 수신
-  purge_ms_[ch] = NowMs();  // [세션 경계] 이 시각 이전의 저장 크롭은 재판독 금지
+  C(ch).best_crop.release();    // [베스트 프레임] 챔피언 리셋 — 다음 차는 백지에서 경연
+  C(ch).best_score = 0; C(ch).best_ocr_score = 0; C(ch).best_oid = 0;
+  C(ch).best_finalized = false;
+  C(ch).purge_ms = NowMs();  // [세션 경계] 이 시각 이전의 저장 크롭은 재판독 금지
+  // [계측] 사이클 스탬프 리셋 — 다음 차의 타임라인은 백지에서
+  C(ch).tr_entry_ms = C(ch).tr_parked_ms = C(ch).tr_first_read_ms = C(ch).tr_final_ms = 0;
 }
 
 // 방금 PlateStore 가 저장한 cap_<slot>.jpg 를 다시 읽어 번호판 숫자를 인식.
@@ -657,13 +698,13 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
   }
   if (ch < 0 || ch >= cfg::kChannels || slot < 0) return;
   // 이미 즉시확정된 차의 늦은 good-shot(재저장) — 판독 불필요 (이중판정 방지)
-  if (plate_done_[ch].count(plate_store_.last_oid(ch))) return;
+  if (C(ch).plate_done.count(plate_store_.last_oid(ch))) return;
   // [헛수고 차단] 이 슬롯은 "이미 배정된 번호"로 판명난 크롭 — 재판독해도 얻을 게 없다
-  if (slot == futile_slot_[ch]) return;
+  if (slot == C(ch).futile_slot) return;
   // [판독 게이트 — 주차 전용 모드] "읽을 일이 있을 때"만: 후보 진행중 or 번호/EV
   //   미확정 점유칸. 구역 없는 채널 포함 그 외 전부 침묵 (08-04 B안 확정).
   if (!parking_.NeedsRead(ch)) {
-    pending_ocr_slot_[ch] = slot;  // [회수 예약] 읽을 일이 생기는 순간 꺼내 읽는다
+    C(ch).pending_ocr_slot = slot;  // [회수 예약] 읽을 일이 생기는 순간 꺼내 읽는다
     static uint64_t last_log[4] = {0, 0, 0, 0};   // 5초 스로틀 로그 (도배 방지)
     uint64_t now = NowMs();
     if (now - last_log[ch] >= 5000) {
@@ -694,6 +735,18 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     EmitEvent(ch, m);
     return;
   }
+  // [굿샷 모양 검문 08-11] WiseAI 굿샷이 정사각/세로 크롭으로 오면 판 일부만 담겨
+  //   쓰레기를 뱉는다 (실측: 256x272→"21구7046", 176x120→"52마7507"). 실판은 가로로
+  //   길어(≈5:1) 최소 2.2:1 은 넘는다. 그 미만은 판 전체를 못 담은 것 → 거부(버스트가 읽음).
+  if ((double)img.cols / img.rows < 2.2) {
+    char m[128];
+    snprintf(m, sizeof(m),
+             "OCR skipped ch%d #%d: good-shot 크롭 모양 이상 (%dx%d, 판 아님) — 버스트로 넘김",
+             ch, slot, img.cols, img.rows);
+    EmitEvent(ch, m);
+    C(ch).futile_slot = slot;   // 같은 슬롯 재판독 방지
+    return;
+  }
 
   // good-shot 품질(선명도) 측정 — 라플라시안 분산. 실측: 정상 100~366, 물렁 10~13.
   cv::Mat gray_q, lap_q;
@@ -703,13 +756,39 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
   cv::meanStdDev(lap_q, lm, ls);
   double sharp = ls[0] * ls[0];
 
+  // [쓰레기 필터 08-11] 심한 블러 good-shot 은 환각만 뱉으므로 OCR 전 스킵 (사용자 요청:
+  //   "블러 많고 상태 안 좋은건 빼고 최종 OCR"). good-shot 척도는 정상 100~366·물렁 10~13
+  //   → 하한 40 미만은 판독 무의미. 버스트/베스트프레임이 선명한 프레임을 잡을 때까지 대기.
+  if (sharp < cfg::kGoodshotMinSharp) {
+    char m[128];
+    snprintf(m, sizeof(m), "OCR skipped ch%d #%d: good-shot 블러 과다 (sharp %.0f < %.0f) — 스킵",
+             ch, slot, sharp, (double)cfg::kGoodshotMinSharp);
+    EmitEvent(ch, m);
+    C(ch).futile_slot = slot;   // 같은 흐린 슬롯 재판독 방지
+    return;
+  }
+
+  // [갤러리 방향 통일 08-11] good-shot(ImageRef) 은 PlateStore 가 원본 그대로 저장해
+  //   카메라 센서 거울상이 그대로 보인다. 반면 best-frame 은 flip 보정본을 저장 → 갤러리에
+  //   거울상/정방향이 섞여 헷갈림. 여기서 OCR 입력과 같은 방향(flip 보정본)으로 슬롯을
+  //   덮어써 갤러리를 통일한다. img 자체는 안 건드리므로 아래 Recognize 의 판독은 불변.
+  if (cfg::kFlipCropH) {
+    cv::Mat show; cv::flip(img, show, 1);
+    std::vector<uchar> jb;
+    if (cv::imencode(".jpg", show, jb)) {
+      std::ofstream ofs(path, std::ios::binary);
+      if (ofs) ofs.write(reinterpret_cast<const char*>(jb.data()), jb.size());
+    }
+  }
+
   char m0[144];
   snprintf(m0, sizeof(m0), "[good-shot] OCR ch%d #%d crop=%dx%d sharp %.0f (load %.1fms)",
            ch, slot, img.cols, img.rows, sharp, load_ms);
   EmitEvent(ch, m0);
+  if (C(ch).tr_first_read_ms == 0) C(ch).tr_first_read_ms = NowMs();  // [계측] 첫 재료
 
   PlateOcrResult r = plate_ocr_.Recognize(img);
-  last_plate_ocr_[ch] = r;
+  C(ch).last_plate_ocr = r;
 
   // 후보 전수 OCR 결과 + 지연시간 (병목 확인용)
   char m1[224];
@@ -744,7 +823,7 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
       if (plate_db_.Match(canon_chk, &t) == 1) canon_chk = t;
     }
     if (parking_.HasPlate(ch, canon_chk)) {
-      futile_slot_[ch] = slot;
+      C(ch).futile_slot = slot;
       char fm[160];
       snprintf(fm, sizeof(fm), "  crop #%d reads \"%s\" — already assigned, stop rereading",
                slot, canon_chk.c_str());
@@ -781,9 +860,9 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
           dbtag = ", db-fix";
         }
       }
-      last_final_[ch] = fin;
+      C(ch).last_final = fin;
       RecordFinal(ch, fin, NowMs(), oid);
-      plate_done_[ch].insert(oid);
+      C(ch).plate_done.insert(oid);
       int dn; double dc; bool dp;
       plate_vote_.Finalize(ch, oid, &dn, &dc, &dp);  // 투표함 비우기(결과 폐기)
       char fm[256];
@@ -1002,8 +1081,23 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
         for (int k = 0; k < 4; k++) pts.push_back({nums[2 * k], nums[2 * k + 1]});
         // Pi 표시좌표는 반전 저장(기본). HTML 오버레이는 판정좌표계에서 직접 찍으므로 ?noflip=1.
         bool flip = qs.find("noflip=1") == std::string::npos;
-        std::string id = parking_.Add(ch, pts, flip);
-        if (id.empty()) { oas->SetStatusCode(422); oas->SetResponseBody("add failed"); return true; }
+        // [08-10] &id=<원하는ID> — 클라이언트가 ID 를 지정해 "같은 ID 삭제→재추가" 수정
+        //   패턴 지원. 영숫자·'-'·'_' 만 통과 (XML/파일 포맷 보호), 중복이면 409.
+        std::string want;
+        size_t ip = qs.find("id=");
+        if (ip != std::string::npos) {
+          std::string raw = qs.substr(ip + 3);
+          size_t amp = raw.find('&'); if (amp != std::string::npos) raw = raw.substr(0, amp);
+          for (char c : raw)
+            if (isalnum((unsigned char)c) || c == '-' || c == '_') want += c;
+          if (want.size() > 23) want = want.substr(0, 23);
+        }
+        std::string id = parking_.Add(ch, pts, flip, want);
+        if (id.empty()) {
+          oas->SetStatusCode(want.empty() ? 422 : 409);
+          oas->SetResponseBody(want.empty() ? "add failed" : "add failed (duplicate id?)");
+          return true;
+        }
         PurgePlateState(ch);  // 구역 변경 = 판독 상태 백지 (이전 세션 plate_done 이월 방지)
         char lg[80]; snprintf(lg, sizeof(lg), "[parking] zone added: %s", id.c_str());
         EmitEvent(ch, lg);
@@ -1025,7 +1119,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
 
     std::string body = "{\"ch\":" + std::to_string(ch) + ",\"objects\":[";
     bool first = true;
-    for (auto& d : latest_[ch]) {
+    for (auto& d : C(ch).latest) {
       char buf[192];
       snprintf(buf, sizeof(buf),
                "%s{\"id\":%ld,\"moving\":%s,\"plate\":%s,\"box\":[%.4f,%.4f,%.4f,%.4f]}",
@@ -1044,7 +1138,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     if (p != std::string::npos) ch = atoi(qs.c_str() + p + 3);
     if (ch < 0 || ch >= cfg::kChannels) ch = 0;
     // 번호판 든 프레임이 있으면 그걸, 없으면 차량 프레임을 반환
-    const std::string& out = !last_plate_xml_[ch].empty() ? last_plate_xml_[ch] : last_xml_[ch];
+    const std::string& out = !C(ch).last_plate_xml.empty() ? C(ch).last_plate_xml : C(ch).last_xml;
     oas->SetResponseBody(out.c_str(), out.size());
   } else if (path == "/rawevents") {
     // [진단] 누적된 이벤트 알림들 (번호 이벤트가 오는지 확인용)
@@ -1053,7 +1147,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     size_t p = qs.find("ch=");
     if (p != std::string::npos) ch = atoi(qs.c_str() + p + 3);
     if (ch < 0 || ch >= cfg::kChannels) ch = 0;
-    oas->SetResponseBody(raw_events_[ch].c_str(), raw_events_[ch].size());
+    oas->SetResponseBody(C(ch).raw_events.c_str(), C(ch).raw_events.size());
   } else if (path == "/lastplate") {
     // 디스크에 저장된 번호판 best JPEG (id 주면 그 차량, 없으면 최신)
     std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
@@ -1078,12 +1172,16 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
       return "[" + std::to_string(a[0]) + "," + std::to_string(a[1]) + "," +
              std::to_string(a[2]) + "," + std::to_string(a[3]) + "]";
     };
+    std::string ic = "[";
+    for (int i = 0; i < cfg::kChannels; i++)
+      ic += (i ? "," : "") + std::to_string(C(i).imgref_ch);
+    ic += "]";
     std::string body = "{\"total\":" + std::to_string(plate_store_.total()) +
                        ",\"ring\":" + std::to_string(cfg::kRingSize) +
                        ",\"plates_seen\":" + std::to_string(plates_seen_) +
                        ",\"imgref_seen\":" + std::to_string(imgref_seen_) +
                        ",\"read_fail\":" + std::to_string(plate_store_.read_fail()) +
-                       ",\"imgref_ch\":" + arr4(imgref_ch_) +
+                       ",\"imgref_ch\":" + ic +
                        ",\"saved_ch\":" + arr4(plate_store_.saved_ch()) + "}";
     oas->AddResponseHeader("Content-type", "application/json");
     oas->SetResponseBody(body.c_str(), body.size());
@@ -1106,7 +1204,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
     size_t p = qs.find("ch="); if (p != std::string::npos) ch = atoi(qs.c_str() + p + 3);
     if (ch < 0 || ch >= cfg::kChannels) ch = 0;
-    std::string ref = last_imgref_[ch];
+    std::string ref = C(ch).last_imgref;
     const char* bases[] = {"", "/tmp", "..", "../..", "../../..", "/mnt/data", "/opt"};
     std::string body = "{\"imgref\":\"" + ref + "\",\"tries\":[";
     std::string found;
@@ -1151,7 +1249,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
     std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
     size_t p = qs.find("ch="); if (p != std::string::npos) ch = atoi(qs.c_str() + p + 3);
     if (ch < 0 || ch >= cfg::kChannels) ch = 0;
-    const PlateOcrResult& r = last_plate_ocr_[ch];
+    const PlateOcrResult& r = C(ch).last_plate_ocr;
     char body[512];
     snprintf(body, sizeof(body),
              "{\"ocr_ready\":%s,\"ch\":%d,\"text\":\"%s\",\"confidence\":%.3f,\"source\":\"%s\","
@@ -1159,7 +1257,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
              "\"tiny\":{\"text\":\"%s\",\"conf\":%.3f,\"ms\":%.1f},"
              "\"total_ms\":%.1f}",
              plate_ocr_ready_ ? "true" : "false", ch, r.text.c_str(), r.confidence, r.source.c_str(),
-             last_final_[ch].c_str(),
+             C(ch).last_final.c_str(),
              r.tiny_text.c_str(), r.tiny_conf, r.tiny_ms, r.total_ms);
     oas->AddResponseHeader("Content-type", "application/json");
     oas->SetResponseBody(body, strlen(body));
@@ -1296,7 +1394,7 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
 
     RefreshSnapshot(ch);
     std::string out;
-    { std::lock_guard<std::mutex> lk(jpeg_mtx_); out = last_jpeg_[ch]; }
+    { std::lock_guard<std::mutex> lk(jpeg_mtx_); out = C(ch).last_jpeg; }
     if (!out.empty()) {
       oas->SetStatusCode(200);
       oas->SetResponseBody(out, OpenAppResponseType::FILE);
@@ -1316,8 +1414,8 @@ void SampleComponent::RefreshSnapshot(int ch) {
   snprintf(jpath, sizeof(jpath), "%s/snap%d.jpg", cfg::kStorageDir, ch);
 
   uint64_t now = NowMs();
-  if (now - last_snap_trigger_[ch] >= 100) {
-    last_snap_trigger_[ch] = now;
+  if (now - C(ch).last_snap_trigger >= 100) {
+    C(ch).last_snap_trigger = now;
     JsonUtility::JsonDocument doc(JsonUtility::Type::kObjectType);
     auto& alloc = doc.GetAllocator();
     doc.AddMember("jpeg_path", rapidjson::Value(jpath, alloc), alloc);
@@ -1342,8 +1440,8 @@ void SampleComponent::RefreshSnapshot(int ch) {
         (unsigned char)data[0] == 0xFF && (unsigned char)data[1] == 0xD8 &&
         (unsigned char)data[n - 2] == 0xFF && (unsigned char)data[n - 1] == 0xD9) {
       std::lock_guard<std::mutex> lk(jpeg_mtx_);
-      last_jpeg_[ch].swap(data);
-      jpeg_ver_[ch]++;   // [신선도] 새 프레임 표시 — 버스트가 같은 프레임 재탕 못 하게
+      C(ch).last_jpeg.swap(data);
+      C(ch).jpeg_ver++;   // [신선도] 새 프레임 표시 — 버스트가 같은 프레임 재탕 못 하게
     }
   }
 }
@@ -1360,7 +1458,7 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
   if (!plate_ocr_ready_ || r <= l || b <= t) return;
   // [판독 게이트 — 주차 전용 모드] 읽을 일(zone=NeedsRead)이 있을 때만 샘플 (B안).
   if (!zone) return;
-  if (plate_done_[ch].count(oid)) return;  // 즉시확정된 차 — 표도 CPU 도 불필요
+  if (C(ch).plate_done.count(oid)) return;  // 즉시확정된 차 — 표도 CPU 도 불필요
 
   // [신선도] 같은 스냅샷 프레임 재판독 금지 — 스냅샷 갱신이 판독보다 느리면 낡은
   //   프레임(이전 차!)을 연사로 재탕해 유령 표를 만든다 ("10버5781" 12연발 실측:
@@ -1369,27 +1467,40 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
   uint64_t ver;
   {
     std::lock_guard<std::mutex> lk(jpeg_mtx_);
-    ver = jpeg_ver_[ch];
-    jpg = last_jpeg_[ch];
+    ver = C(ch).jpeg_ver;
+    jpg = C(ch).last_jpeg;
   }
   RefreshSnapshot(ch);  // 다음 프레임 주문 (스로틀 내장)
   if (jpg.empty() || ver == 0) return;
-  if (burst_ver_[ch][oid] == ver) return;   // 아직 같은 프레임 — 새것 오면 판독
+  if (C(ch).burst_ver[oid] == ver) return;   // 아직 같은 프레임 — 새것 오면 판독
   if (!plate_vote_.CanSample(ch, oid, now_ms, zone)) return;  // zone=연사 모드
-  burst_ver_[ch][oid] = ver;
-  if (burst_ver_[ch].size() > 512) burst_ver_[ch].clear();  // 폭주 방지
+  C(ch).burst_ver[oid] = ver;
+  if (C(ch).burst_ver.size() > 512) C(ch).burst_ver.clear();  // 폭주 방지
 
-  std::vector<uchar> buf(jpg.begin(), jpg.end());
-  cv::Mat frame = cv::imdecode(buf, cv::IMREAD_COLOR);
+  cv::Mat frame;
+  if (C(ch).dec_frame_ver == ver && !C(ch).dec_frame.empty()) {
+    frame = C(ch).dec_frame;  // [가속] 같은 세대 재사용 — imdecode 0회
+  } else {
+    std::vector<uchar> buf(jpg.begin(), jpg.end());
+    uint64_t dec0 = NowMs();  // [계측] 풀해상 디코드 비용
+    frame = cv::imdecode(buf, cv::IMREAD_COLOR);
+    C(ch).dec_ms_sum += NowMs() - dec0;
+    C(ch).dec_n++;
+    C(ch).dec_frame = frame;
+    C(ch).dec_frame_ver = ver;
+  }
   if (frame.empty()) return;
+  if (C(ch).tr_first_read_ms == 0) C(ch).tr_first_read_ms = now_ms;  // [계측] 첫 재료
 
   // 좌표 정규화(0~1): 파서가 픽셀좌표를 주는 경우 프레임 크기로 나눔
-  double fw = frame_w_[ch] > 1.0 ? frame_w_[ch] : 1.0;
-  double fh = frame_h_[ch] > 1.0 ? frame_h_[ch] : 1.0;
+  double fw = C(ch).frame_w > 1.0 ? C(ch).frame_w : 1.0;
+  double fh = C(ch).frame_h > 1.0 ? C(ch).frame_h : 1.0;
   double L = l, T = t, R = r, B = b;
   if (R > 1.5 || B > 1.5) { L /= fw; R /= fw; T /= fh; B /= fh; }
 
-  // 지연 보정 여백
+  // 지연 보정 여백 — 원복(08-11): 90% 는 배경/옆물건까지 담겨 box 800+ 로 폭발, 판독
+  //   불능이 됐다(41저1737 실측). 적당히(가로 35%/세로 60%) — 앞 글자 잘림은 판을 카메라
+  //   정면·중앙에 두는 물리로 해결하고, 크롭은 판만 담게 좁게 유지한다.
   double bw = R - L, bh = B - T;
   L -= bw * 0.35; R += bw * 0.35;
   T -= bh * 0.60; B += bh * 0.60;
@@ -1398,6 +1509,32 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
   if (x1 - x0 < 48 || y1 - y0 < 16) return;  // 너무 작으면(멀면) 스킵
 
   cv::Mat crop = frame(cv::Rect(x0, y0, x1 - x0, y1 - y0));
+
+  // [베스트 프레임 모드 08-11] OCR 안 하고 이 크롭의 품질 점수만 계산 → 챔피언만 보관.
+  //   점수 = sharp(라플라시안 분산) × sqrt(면적). 선명하고 큰 크롭이 이긴다.
+  //   주차 완료 순간 FinalizeBestFrame 이 챔피언 1장만 OCR (사용자 설계: 최고 프레임 1장).
+  if (park_tune_.best_frame_mode == 1) {
+    // [쓰레기 필터 08-11] 판이 아닌 오크롭·심한 블러는 챔피언 후보에서 원천 배제.
+    //   ① 비율: 실판 크롭은 가로/세로 2.5~3+. 정사각(로고·배경 오크롭)은 컷.
+    double aspect = (double)crop.cols / crop.rows;
+    if (aspect < park_tune_.best_min_aspect) return;
+    cv::Mat cg;
+    cv::cvtColor(crop, cg, cv::COLOR_BGR2GRAY);
+    cv::Mat lap; cv::Laplacian(cg, lap, CV_64F);
+    cv::Scalar mu, sd; cv::meanStdDev(lap, mu, sd);
+    double sharp = sd[0] * sd[0];
+    // ② 선명도 하한: 이 미만은 최종 OCR 무의미(멀리/초점나감) — 후보 제외.
+    //    다 미달이면 best_crop 이 비어 FinalizeBestFrame 이 판독 보류(다음 프레임 대기).
+    if (sharp < park_tune_.best_min_sharp) return;
+    double score = sharp * std::sqrt((double)(crop.cols * crop.rows));
+    if (score > C(ch).best_score) {
+      C(ch).best_score = score;
+      C(ch).best_crop = crop.clone();      // 프레임 캐시가 다음에 덮이므로 복사
+      C(ch).best_oid = oid;
+    }
+    return;   // OCR 은 주차 완료 시 챔피언에만
+  }
+
   // 버스트는 경량 파이프라인(후보 3, 구조대 생략) — 참고 표에 풀코스는 과함(부하 다이어트)
   PlateOcrResult br = plate_ocr_.Recognize(crop, /*light=*/true);
   // 스냅샷-bbox 시간 어긋남 시 tinyLPR 이 conf 0.5~0.85 짜리 "환각 번호판"을 지어냄(실측).
@@ -1413,7 +1550,7 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
     cv::cvtColor(crop, g, cv::COLOR_BGR2GRAY);
     cv::Mat rs;
     cv::resize(g, rs, cv::Size(SW, SH), 0, 0, cv::INTER_AREA);
-    StackAcc& a = stack_acc_[ch][oid];
+    StackAcc& a = C(ch).stack_acc[oid];
     if (a.sum.empty()) a.sum = cv::Mat::zeros(SH, SW, CV_32FC1);
     cv::Mat f;
     rs.convertTo(f, CV_32F);
@@ -1425,6 +1562,55 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
            Hl(cfg::kAnsiDim), ch, oid, plate_vote_.Count(ch, oid), br.text.c_str(), br.confidence,
            x1 - x0, y1 - y0, br.total_ms, Hl(cfg::kAnsiReset));
   EmitEvent(ch, m);
+}
+
+// [베스트 프레임 확정 08-11] 진입~주차 동안 sharp×크기로 뽑은 챔피언 크롭 1장만 OCR.
+//   "최고의 한 프레임만 판독" — 사용자 설계. 결과는 기존 투표/DB/EV 경로에 그대로 태운다.
+void SampleComponent::FinalizeBestFrame(int ch, uint64_t now_ms) {
+  if (park_tune_.best_frame_mode != 1) return;
+  if (C(ch).best_finalized || C(ch).best_crop.empty() || !plate_ocr_ready_) return;
+  if (C(ch).best_score <= C(ch).best_ocr_score) return;  // 더 나은 챔피언 없음 — 재OCR 낭비 방지
+  C(ch).best_ocr_score = C(ch).best_score;
+  long oid = C(ch).best_oid;
+  if (C(ch).plate_done.count(oid)) return;
+
+  cv::Mat cg; cv::cvtColor(C(ch).best_crop, cg, cv::COLOR_BGR2GRAY);
+  cv::Mat lap; cv::Laplacian(cg, lap, CV_64F);
+  cv::Scalar mu, sd; cv::meanStdDev(lap, mu, sd);
+  double sharp = sd[0] * sd[0];
+
+  // [갤러리] OCR 에 실제 들어간 챔피언 크롭을 저장 → /plate?n= 로 눈으로 확인
+  //   (kFlipCropH 반영본을 저장해 사람이 보는 방향과 모델 입력이 일치).
+  {
+    cv::Mat show = cfg::kFlipCropH ? [&]{ cv::Mat f; cv::flip(C(ch).best_crop, f, 1); return f; }()
+                                   : C(ch).best_crop;
+    std::vector<uchar> jb; cv::imencode(".jpg", show, jb);
+    std::string js(jb.begin(), jb.end());
+    plate_store_.SaveDebugImage(ch, js);   // cap 슬롯 + plate_last.jpg
+    char sm[96];
+    snprintf(sm, sizeof(sm), "  [gallery] best-frame 크롭 저장 (sharp %.0f, %dx%d)",
+             sharp, C(ch).best_crop.cols, C(ch).best_crop.rows);
+    EmitEvent(ch, sm);
+  }
+
+  // 챔피언은 풀 파이프라인(light=false)으로 정독 — 딱 1장이라 비용 감당 가능.
+  PlateOcrResult br = plate_ocr_.Recognize(C(ch).best_crop, /*light=*/false);
+  char m[224];
+  snprintf(m, sizeof(m),
+           "%s🏆 best-frame ch%d id%ld \"%s\" (conf %.2f, box %dx%d, sharp %.0f)%s",
+           Hl(cfg::kAnsiInfo), ch, oid, br.text.c_str(), br.confidence,
+           C(ch).best_crop.cols, C(ch).best_crop.rows, sharp, Hl(cfg::kAnsiReset));
+  EmitEvent(ch, m);
+
+  bool done = false;
+  if (!br.text.empty() && br.confidence >= 0.90) {
+    plate_vote_.Add(ch, oid, br.text, br.confidence, /*primary=*/true);  // primary=챔피언
+    done = TryFinalizeOid(ch, oid, now_ms);
+  }
+  // 챔피언이 게이트 미달(conf<0.95 & DB 회수 실패)이면 확정 안 됨 — best_finalized 를
+  //   세우지 않아, 더 선명한 챔피언이 나오거나 재도전 라운드에서 다시 시도하게 둔다.
+  //   (안 그러면 저품질 1장으로 붕 떠 영영 read starving — 08-11 실측 수리)
+  C(ch).best_finalized = done;
 }
 
 // [최후 판독] 카메라가 번호판 객체를 안 주는 정지차 — 구역 영역을 스냅샷에서 직접
@@ -1440,12 +1626,12 @@ void SampleComponent::ZoneFallbackOcr(int ch, uint64_t now_ms) {
   uint64_t ver;
   {
     std::lock_guard<std::mutex> lk(jpeg_mtx_);
-    ver = jpeg_ver_[ch];
-    jpg = last_jpeg_[ch];
+    ver = C(ch).jpeg_ver;
+    jpg = C(ch).last_jpeg;
   }
   RefreshSnapshot(ch);  // 다음 프레임 주문
-  if (jpg.empty() || ver == 0 || ver == zfb_ver_[ch]) return;  // 새 프레임에서만
-  zfb_ver_[ch] = ver;
+  if (jpg.empty() || ver == 0 || ver == C(ch).zfb_ver) return;  // 새 프레임에서만
+  C(ch).zfb_ver = ver;
 
   std::vector<uchar> buf(jpg.begin(), jpg.end());
   cv::Mat frame = cv::imdecode(buf, cv::IMREAD_COLOR);
@@ -1485,7 +1671,7 @@ void SampleComponent::ZoneFallbackOcr(int ch, uint64_t now_ms) {
       }
       if (zr.text.empty() || zr.confidence < 0.90) continue;  // 환각 컷 (버스트와 동일)
       // 표 적립 (점유차 oid) + 배정 좌표를 구역 중심으로 고정 + 즉석 개표
-      plate_pos_[ch][pr.oid] = {(pr.l + pr.r) / 2.0, (pr.t + pr.b) / 2.0};
+      C(ch).plate_pos[pr.oid] = {(pr.l + pr.r) / 2.0, (pr.t + pr.b) / 2.0};
       plate_vote_.Add(ch, pr.oid, zr.text, zr.confidence, /*primary=*/false);
       char m[224];
       snprintf(m, sizeof(m), "%s  zone-ocr ch%d %s \"%s\" (conf %.2f, box %dx%d, %.1fms)%s",
@@ -1557,7 +1743,7 @@ void SampleComponent::PresenceCheck(int ch, const std::vector<ParkingZone::Pendi
   if (park_tune_.presence_miss == 0) {
     for (const auto& pr : rects)
       if (parking_.ForceLeave(ch, pr.id, now_ms)) {
-        presence_txt_[ch].erase(pr.id);
+        C(ch).presence_txt.erase(pr.id);
         EmitEvent(ch, "🅿️ LEFT " + pr.id + " — 부재 지속, 즉시 출차 (육안검증 off)");
         PurgePlateState(ch);
         CheckParkingEvent(ch);
@@ -1569,32 +1755,46 @@ void SampleComponent::PresenceCheck(int ch, const std::vector<ParkingZone::Pendi
   uint64_t ver;
   {
     std::lock_guard<std::mutex> lk(jpeg_mtx_);
-    ver = jpeg_ver_[ch];
-    jpg = last_jpeg_[ch];
+    ver = C(ch).jpeg_ver;
+    jpg = C(ch).last_jpeg;
   }
   RefreshSnapshot(ch);  // 다음 프레임 주문
-  if (jpg.empty() || ver == 0 || ver == presence_ver_[ch]) return;  // 새 프레임에서만
-  presence_ver_[ch] = ver;
+  if (jpg.empty() || ver == 0 || ver == C(ch).presence_ver) return;  // 새 프레임에서만
+  C(ch).presence_ver = ver;
 
-  std::vector<uchar> buf(jpg.begin(), jpg.end());
-  cv::Mat frame = cv::imdecode(buf, cv::IMREAD_COLOR);
+  cv::Mat frame;
+  if (C(ch).dec_frame_ver == ver && !C(ch).dec_frame.empty()) {
+    frame = C(ch).dec_frame;  // [가속] 버스트가 이미 디코드한 세대면 재사용
+  } else {
+    std::vector<uchar> buf(jpg.begin(), jpg.end());
+    uint64_t dec0 = NowMs();  // [계측] 풀해상 디코드 비용
+    frame = cv::imdecode(buf, cv::IMREAD_COLOR);
+    C(ch).dec_ms_sum += NowMs() - dec0;
+    C(ch).dec_n++;
+    C(ch).dec_frame = frame;
+    C(ch).dec_frame_ver = ver;
+  }
   if (frame.empty()) return;
 
   for (const auto& pr : rects) {
-    // 수색 창은 zone-ocr 와 동일 배치 (판이 있을 만한 자리 전부)
+    // [가속 08-07] 검증 창 다이어트 — 번호가 배정된 칸은 "판이 있던 자리(정조준)와
+    //   구역 전체" 2개면 충분 (거기 없으면 빈칸). 빈칸일 때 창 11개 전부 OCR 하느라
+    //   프레임 234~249ms 블로킹 실측 → 2개로 축소 (~60ms). 앵커가 없는 칸(번호
+    //   미확정)만 기존 격자 수색 유지.
     const double W = pr.r - pr.l, H = pr.b - pr.t;
     std::vector<std::array<double, 4>> wins;
     const double ww = W * 0.70, wh = H * 0.32;
-    // [정조준] 번호가 마지막으로 읽힌 좌표를 1순위 창으로 — 구역을 작게 그려 판이
-    //   구역 가장자리/밖에 걸려도 검증이 판을 본다 (08-06 실측: plate pos in_zone=0
-    //   상태에서 구역 안 창들만 뒤져 쓰레기 읽고 가짜 LEFT).
-    if (pr.px > 0.0 || pr.py > 0.0)
+    if (pr.px > 0.0 || pr.py > 0.0) {
+      // [정조준] 번호가 마지막으로 읽힌 좌표 (구역 밖에 걸린 판도 커버 — 08-06 실측)
       wins.push_back({pr.px - ww / 2, pr.py - wh / 2, pr.px + ww / 2, pr.py + wh / 2});
-    for (double cyf : {0.38, 0.60, 0.82})
-      for (double cxf : {0.30, 0.50, 0.70})
-        wins.push_back({pr.l + W * cxf - ww / 2, pr.t + H * cyf - wh / 2,
-                        pr.l + W * cxf + ww / 2, pr.t + H * cyf + wh / 2});
-    wins.push_back({pr.l, pr.t, pr.r, pr.b});
+      wins.push_back({pr.l, pr.t, pr.r, pr.b});   // 백업: 구역 전체
+    } else {
+      for (double cyf : {0.38, 0.60, 0.82})
+        for (double cxf : {0.30, 0.50, 0.70})
+          wins.push_back({pr.l + W * cxf - ww / 2, pr.t + H * cyf - wh / 2,
+                          pr.l + W * cxf + ww / 2, pr.t + H * cyf + wh / 2});
+      wins.push_back({pr.l, pr.t, pr.r, pr.b});
+    }
     std::string btxt;
     double best = 0.0;
     for (const auto& w : wins) {
@@ -1616,14 +1816,14 @@ void SampleComponent::PresenceCheck(int ch, const std::vector<ParkingZone::Pendi
         present = SimilarPlate(btxt, pr.plate);
       } else {
         // 번호 미확정 칸: 직전 체크의 읽기와 일치해야 인정 (연속성 = 진짜 판의 지문)
-        present = SimilarPlate(btxt, presence_txt_[ch][pr.id]);
-        presence_txt_[ch][pr.id] = btxt;
+        present = SimilarPlate(btxt, C(ch).presence_txt[pr.id]);
+        C(ch).presence_txt[pr.id] = btxt;
       }
     }
     if (present) {
       parking_.PresenceSeen(ch, pr.id, now_ms);
-      if (now_ms - presence_hold_ms_[ch] >= 10000) {   // 유지 로그는 10초 스로틀
-        presence_hold_ms_[ch] = now_ms;
+      if (now_ms - C(ch).presence_hold_ms >= 10000) {   // 유지 로그는 10초 스로틀
+        C(ch).presence_hold_ms = now_ms;
         char m[224];
         snprintf(m, sizeof(m),
                  "🅿️ %s 추적 끊김(WiseAI 정지차 드랍)이지만 칸에 판 잔존 — 주차 유지 "
@@ -1635,7 +1835,7 @@ void SampleComponent::PresenceCheck(int ch, const std::vector<ParkingZone::Pendi
       int miss = parking_.PresenceMiss(ch, pr.id);
       if (miss >= park_tune_.presence_miss) {
         if (parking_.ForceLeave(ch, pr.id, now_ms)) {
-          presence_txt_[ch].erase(pr.id);
+          C(ch).presence_txt.erase(pr.id);
           char lm[128];
           snprintf(lm, sizeof(lm), "🅿️ LEFT %s — 부재 + 칸 육안검증 %d연속 빈칸, 출차 확정",
                    pr.id.c_str(), miss);
@@ -1662,14 +1862,15 @@ void SampleComponent::PresenceCheck(int ch, const std::vector<ParkingZone::Pendi
 // 한 프레임의 ONVIF 메타데이터(XML)를 받아 객체를 추적하고, 움직이는 객체를 감지한다.
 void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   if (ch < 0 || ch >= cfg::kChannels) return;
-  uint64_t tick = ++tick_[ch];
+  uint64_t tick = ++C(ch).tick;
+  uint64_t t_frame0 = NowMs();  // [계측] 이 프레임 처리에 쓴 시간 (스레드 블로킹 감시)
 
   // [진단] 객체 프레임 원본을 latch → /rawmeta 로 통째로 확인 (이벤트 알림 XML 은 제외)
   if (xml.find("VideoAnalytics") != std::string::npos) {   // = tt:Object 든 프레임만
     if (xml.find("LicensePlate") != std::string::npos) {
-      last_plate_xml_[ch] = xml;   // 최우선: 번호판 객체가 든 프레임
+      C(ch).last_plate_xml = xml;   // 최우선: 번호판 객체가 든 프레임
     } else if (xml.find("Vehicle") != std::string::npos) {
-      last_xml_[ch] = xml;         // fallback: 그냥 차량 프레임
+      C(ch).last_xml = xml;         // fallback: 그냥 차량 프레임
     }
   }
 
@@ -1680,17 +1881,17 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     size_t de = xml.find("</tt:Data>");
     if (ts != std::string::npos && de != std::string::npos && de > ts) {
       std::string ev = xml.substr(ts, de - ts + 10);
-      if (raw_events_[ch].find(ev) == std::string::npos && raw_events_[ch].size() < 8000)
-        raw_events_[ch] += ev + "\n\n";
+      if (C(ch).raw_events.find(ev) == std::string::npos && C(ch).raw_events.size() < 8000)
+        C(ch).raw_events += ev + "\n\n";
     }
   }
 
   // ---- [2단계] 파싱: XML → SDK 무관 객체 구조 (문자열 스캔은 MetadataParser 안에) ----
-  meta::Frame fr = meta::Parser::Parse(xml, frame_w_[ch], frame_h_[ch]);
-  frame_w_[ch] = fr.frame_w;   // scale 있으면 갱신, 없으면 이전 값 유지
-  frame_h_[ch] = fr.frame_h;
-  double fw = frame_w_[ch] > 1.0 ? frame_w_[ch] : 1.0;
-  double fh = frame_h_[ch] > 1.0 ? frame_h_[ch] : 1.0;
+  meta::Frame fr = meta::Parser::Parse(xml, C(ch).frame_w, C(ch).frame_h);
+  C(ch).frame_w = fr.frame_w;   // scale 있으면 갱신, 없으면 이전 값 유지
+  C(ch).frame_h = fr.frame_h;
+  double fw = C(ch).frame_w > 1.0 ? C(ch).frame_w : 1.0;
+  double fh = C(ch).frame_h > 1.0 ? C(ch).frame_h : 1.0;
 
   // ---- 번호판 숫자 텍스트가 실려오면 알림 (카메라가 주면) ----
   if (!fr.plate_number.empty() && fr.plate_number != last_plate_) {
@@ -1705,7 +1906,7 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   std::vector<PlateBox> plates;
   for (auto& ob : fr.objects) {
     if (ob.cls == meta::kPlate) {
-      if (!ob.imgref.empty()) last_imgref_[ch] = ob.imgref;  // [진단] 크롭 경로 latch (detect 무관)
+      if (!ob.imgref.empty()) C(ch).last_imgref = ob.imgref;  // [진단] 크롭 경로 latch (detect 무관)
       if (detect_vehicle_)
         plates.push_back({ob.id, ob.parent, ob.l, ob.t, ob.r, ob.b, ob.imgref});
     } else if (ob.cls == meta::kVehicle && detect_vehicle_) {
@@ -1723,19 +1924,19 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   {
     uint64_t now_tmp = NowMs();
     if (!plates.empty()) {
-      if (!plate_meta_on_[ch])
+      if (!C(ch).plate_meta_on)
         EmitEvent(ch, "🔎 WiseAI plate detection ON — plate objects arriving");
-      plate_meta_on_[ch] = true;
-      last_plate_meta_ms_[ch] = now_tmp;
-    } else if (plate_meta_on_[ch] && now_tmp - last_plate_meta_ms_[ch] > 3000) {
-      plate_meta_on_[ch] = false;
+      C(ch).plate_meta_on = true;
+      C(ch).last_plate_meta_ms = now_tmp;
+    } else if (C(ch).plate_meta_on && now_tmp - C(ch).last_plate_meta_ms > 3000) {
+      C(ch).plate_meta_on = false;
       EmitEvent(ch, "🔎 WiseAI plate detection OFF — no plate objects for 3s");
     }
   }
 
   // 첫 프레임 진단 로그
-  if (!meta_diag_done_[ch]) {
-    meta_diag_done_[ch] = true;
+  if (!C(ch).meta_diag_done) {
+    C(ch).meta_diag_done = true;
     char d[160];
     snprintf(d, sizeof(d), "[diag] ch%d objects %zu, frame=%.0fx%.0f",
              ch, cur.size(), fw, fh);
@@ -1747,7 +1948,7 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   std::vector<MotionTracker::Sample> samples;
   samples.reserve(cur.size());
   for (auto& c : cur) samples.push_back({c.id, c.cx, c.cy, c.veh});
-  auto motion = motion_[ch].Update(tick, now_ms, samples);
+  auto motion = C(ch).motion.Update(tick, now_ms, samples);
 
   std::vector<Detection> dets;
   for (size_t i = 0; i < cur.size(); i++) {
@@ -1773,11 +1974,11 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     // 번호판 중심점 — 차량 객체가 목록에서 빠진 장기 정지차의 점유 증거 (정규화)
     // [유령 필터] 출차한 차의 번호판 id(명부 15초)는 제외 — 얼어붙은 반복 레코드가
     //   빈칸을 재점화하는 것 방지. 새 차의 판은 새 id 라 즉시 통과 (시간 차단 없음).
-    for (auto it = ghost_plate_[ch].begin(); it != ghost_plate_[ch].end();)
-      it = (now_ms - it->second > 15000) ? ghost_plate_[ch].erase(it) : std::next(it);
+    for (auto it = C(ch).ghost_plate.begin(); it != C(ch).ghost_plate.end();)
+      it = (now_ms - it->second > 15000) ? C(ch).ghost_plate.erase(it) : std::next(it);
     std::vector<ParkingZone::PlatePt> ppts;
     for (auto& p : plates) {
-      if (ghost_plate_[ch].count(p.id)) continue;
+      if (C(ch).ghost_plate.count(p.id)) continue;
       double cx = (p.l + p.r) / 2.0, cy = (p.t + p.b) / 2.0;
       if (p.r > 1.5 || p.b > 1.5) { cx /= fw; cy /= fh; }
       if (cx > 0.0 || cy > 0.0) ppts.push_back({p.id, cx, cy});  // (0,0) 무좌표 프레임 제외
@@ -1786,6 +1987,16 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     parking_.Update(ch, pv, now_ms, &plog, &ppts);
     for (const auto& line : plog) {
       EmitEvent(ch, line);  // 디버거뷰어: 후보/주차/출차 전이
+      if (line.find("PARKED") != std::string::npos) {
+        if (C(ch).tr_parked_ms == 0) C(ch).tr_parked_ms = now_ms;  // [계측] 주차 확정 시각
+        // [베스트 프레임 08-11] 주차 확정 = "진입~여기까지 모은 최고 프레임 1장을 지금
+        //   판독하라". WiseAI 굿샷은 완전히 안 쓴다 (크롭 모양·화질 통제 불가). 우리가
+        //   직접 자른 버스트 크롭 중 sharp×크기 챔피언 딱 한 장만 OCR — 사용자 설계.
+        // [churn 차단 08-11] 이미 완결된 칸(점유+번호+EV)에 같은 차가 새 WiseAI id 로
+        //   재-PARKED 될 때 재확정하면 헛 FINAL(정답을 못 덮으나 로그·EV조회 낭비 +
+        //   "주차중"이 안 끝나 보임)이 뿜어진다. NeedsRead 가 false = 읽을 일 없음이면 침묵.
+        if (parking_.NeedsRead(ch)) FinalizeBestFrame(ch, now_ms);
+      }
       // 출차/스쳐간 정리 순간 — 이전 차의 판독 상태를 통째로 폐기 (표 이월 금지)
       if (line.find("LEFT") != std::string::npos || line.find("스쳐간") != std::string::npos)
         PurgePlateState(ch);
@@ -1793,11 +2004,14 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     CheckParkingEvent(ch);  // [EventStatus] 출차로 위반 해제됐으면 통지
     // 진입 로그 (상승엣지 + 5초 스로틀) — 판독 가동 자체는 아래 번호판 루프가 위치로 판단.
     bool attn = parking_.Attention(ch);
-    if (attn && !park_attn_[ch] && now_ms - park_attn_log_ms_[ch] >= 5000) {
+    // [계측] 구역 주목 중 첫 순간 — 상승엣지 조건이면 연속 점유 리그(차가 계속 구역에
+    //   있음)에서 스탬프가 영영 안 찍혀 -1.0 로 새는 실측 → attn 이면 무조건 스탬프.
+    if (attn && C(ch).tr_entry_ms == 0) C(ch).tr_entry_ms = now_ms;
+    if (attn && !C(ch).park_attn && now_ms - C(ch).park_attn_log_ms >= 5000) {
       EmitEvent(ch, "🅿️ zone entry (65%+) — plate read engaged");
-      park_attn_log_ms_[ch] = now_ms;
+      C(ch).park_attn_log_ms = now_ms;
     }
-    park_attn_[ch] = attn;
+    C(ch).park_attn = attn;
   }
 
   // ---- 번호판: 감지 알림 + 저장(PlateStore) + 박스 표시 ----
@@ -1805,13 +2019,19 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   //   번호/EV 미확정 점유칸이 있을 때. 전 칸 완결이면 완전 침묵 (08-04).
   const bool park_busy = parking_.Busy(ch);            // 진입 로그용
   const bool park_read = parking_.NeedsRead(ch);       // 판독 가동 여부
-  // [실험 종료 08-06] 굿샷 우선 5초 유예 폐지 — 굿샷(q45, sharp 300~600)이 유예 안에
-  //   도착하면 오독 FINAL 을 선점하는 역효과 실측 (09러5673/03저3449/10조5466/27마8887,
-  //   같은 차를 버스트는 0.96+ 정독). 버스트 즉시 가동이 정답.
-  const bool burst_ok = park_read;
+  // [굿샷 우선 08-11] 판독 시작(NeedsRead 상승엣지) 스탬프 → grace 동안 버스트 보류.
+  //   사용자 지시: 굿샷을 먼저 쓴다 (물리 셋업 개선 후 굿샷 화질이 좋아진 전제).
+  if (park_read && !C(ch).park_read_prev) C(ch).read_start_ms = now_ms;
+  C(ch).park_read_prev = park_read;
+  // 버스트 개시: grace=0(끔) 또는 grace 경과 후에만. grace 동안엔 굿샷만 판독 —
+  //   굿샷이 그 안에 확정 내면(park_read=false) 버스트는 아예 안 돌고 끝. 굿샷이 영영
+  //   안 와도 grace 뒤엔 버스트가 켜져 최소한 읽긴 한다 (imgref=X 무한대기 방지).
+  const bool burst_ok = park_read &&
+      (park_tune_.goodshot_grace_ms == 0 ||
+       now_ms - C(ch).read_start_ms >= park_tune_.goodshot_grace_ms);
   for (auto& p : plates) {
-    bool is_new = plate_seen_[ch].find(p.id) == plate_seen_[ch].end();
-    plate_seen_[ch][p.id] = {tick, now_ms};
+    bool is_new = C(ch).plate_seen.find(p.id) == C(ch).plate_seen.end();
+    C(ch).plate_seen[p.id] = {tick, now_ms};
     // [위치 기록] 이 번호판의 중심좌표(정규화) — 배정 시 1차 참고 (실패 시 근접 폴백).
     bool settled = false;  // 이 번호판이 "완결된 칸" 안 — 판독 침묵 (15초마다 재확인 창)
     bool near_zone = true; // 칸 근처(20% 확장) 판만 판독 — 먼 판(모니터 영상 등) 제외
@@ -1819,8 +2039,8 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
       double cx = (p.l + p.r) / 2.0, cy = (p.t + p.b) / 2.0;
       if (p.r > 1.5 || p.b > 1.5) { cx /= fw; cy /= fh; }  // 픽셀 좌표계면 정규화
       if (cx > 0.0 || cy > 0.0) {
-        plate_pos_[ch][p.id] = {cx, cy};
-        if (plate_pos_[ch].size() > 512) plate_pos_[ch].clear();  // 폭주 방지
+        C(ch).plate_pos[p.id] = {cx, cy};
+        if (C(ch).plate_pos.size() > 512) C(ch).plate_pos.clear();  // 폭주 방지
         settled = parking_.SettledAt(ch, cx, cy);
         if (parking_.HasZones(ch))
           near_zone = parking_.NearAnyZone(ch, cx, cy, park_tune_.burst_margin);
@@ -1834,7 +2054,7 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     }
     if (is_new) {  // 새 번호판 등장 순간에만 알림 1번 + 진단 카운트
       plates_seen_++;
-      if (!p.imgref.empty()) { imgref_seen_++; imgref_ch_[ch]++; }
+      if (!p.imgref.empty()) { imgref_seen_++; C(ch).imgref_ch++; }
       char m[128];
       snprintf(m, sizeof(m),
                "plate detected (ch%d id%ld) imgref=%s",
@@ -1848,8 +2068,8 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
       std::string sev = plate_store_.Save(ch, p.imgref, now_ms);
       if (!sev.empty()) {
         EmitEvent(ch, sev);
-        last_save_ms_[ch] = now_ms;  // [세션 경계] 이번 세션 크롭 표시
-        futile_slot_[ch] = -1;       // 새 크롭 — 헛수고 마킹 해제 (새 차일 수 있음)
+        C(ch).last_save_ms = now_ms;  // [세션 경계] 이번 세션 크롭 표시
+        C(ch).futile_slot = -1;       // 새 크롭 — 헛수고 마킹 해제 (새 차일 수 있음)
         RecognizePlate(ch, plate_store_.last_slot(ch));
       }
     }
@@ -1870,37 +2090,44 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
   for (int c = 0; c < cfg::kChannels; ++c) {
     // ⓪a [출차 육안검증] 부재 의심 칸 — NeedsRead 게이트보다 먼저 (완결 칸도 대상).
     //    출차 확정은 여기서만 내려온다 (부재 타이머 단독으로는 절대 출차 안 함).
-    if (now_ms - presence_ms_[c] >= park_tune_.presence_period_ms) {
+    if (now_ms - C(c).presence_ms >= park_tune_.presence_period_ms) {
       auto susp = parking_.AbsenceSuspects(c, now_ms);
       if (!susp.empty()) {
-        presence_ms_[c] = now_ms;
+        C(c).presence_ms = now_ms;
         PresenceCheck(c, susp, now_ms);
       }
     }
-    if (!parking_.NeedsRead(c)) continue;   // 읽을 일 없는 채널은 완전 침묵
+    if (!parking_.NeedsRead(c)) {
+      // [가속] 유휴 채널은 디코드 캐시 반납 (풀해상 Mat ~12MB/ch)
+      if (!C(c).dec_frame.empty() && parking_.AbsenceSuspects(c, now_ms).empty()) {
+        C(c).dec_frame.release();
+        C(c).dec_frame_ver = 0;
+      }
+      continue;   // 읽을 일 없는 채널은 완전 침묵
+    }
     // ⓪ [진단 심장박동] 판독 재료 현황 — "카메라가 번호판을 주는가"가 한눈에 (5초)
-    if (now_ms - hb_ms_[c] >= 5000) {
-      hb_ms_[c] = now_ms;
+    if (now_ms - C(c).hb_ms >= 5000) {
+      C(c).hb_ms = now_ms;
       uint64_t last_plate_ms = 0;
       int max_votes = 0;
-      for (const auto& kv : plate_seen_[c]) {
+      for (const auto& kv : C(c).plate_seen) {
         if (kv.second.ms > last_plate_ms) last_plate_ms = kv.second.ms;
         int n = plate_vote_.Count(c, kv.first);
         if (n > max_votes) max_votes = n;
       }
       char hb[224];
-      if (plate_seen_[c].empty())
+      if (C(c).plate_seen.empty())
         snprintf(hb, sizeof(hb),
                  "🅿️ hb ch%d: CAMERA GIVES NO PLATE OBJECTS — waiting for plate bbox "
                  "(last save %.1fs ago)",
-                 c, last_save_ms_[c] ? (now_ms - last_save_ms_[c]) / 1000.0 : -1.0);
+                 c, C(c).last_save_ms ? (now_ms - C(c).last_save_ms) / 1000.0 : -1.0);
       else {
         // [진단] 추적 중 판이 구역 근처(버스트 사거리)에 몇 개인가 — 0/N 이면
         //   "판은 오는데 전부 구역 밖" = 구역을 판 포함하게 다시 그려야 하는 상황.
         int near_cnt = 0, pos_cnt = 0;
-        for (const auto& kv : plate_seen_[c]) {
-          auto pp = plate_pos_[c].find(kv.first);
-          if (pp == plate_pos_[c].end()) continue;
+        for (const auto& kv : C(c).plate_seen) {
+          auto pp = C(c).plate_pos.find(kv.first);
+          if (pp == C(c).plate_pos.end()) continue;
           pos_cnt++;
           if (parking_.NearAnyZone(c, pp->second.first, pp->second.second,
                                    park_tune_.burst_margin)) near_cnt++;
@@ -1908,27 +2135,37 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
         snprintf(hb, sizeof(hb),
                  "🅿️ hb ch%d: plates tracked=%d (last seen %.1fs ago, near-zone %d/%d), "
                  "votes max=%d, last save %.1fs ago",
-                 c, (int)plate_seen_[c].size(),
+                 c, (int)C(c).plate_seen.size(),
                  last_plate_ms ? (now_ms - last_plate_ms) / 1000.0 : -1.0,
                  near_cnt, pos_cnt, max_votes,
-                 last_save_ms_[c] ? (now_ms - last_save_ms_[c]) / 1000.0 : -1.0);
+                 C(c).last_save_ms ? (now_ms - C(c).last_save_ms) / 1000.0 : -1.0);
       }
       EmitEvent(c, hb);
+      // [계측] 스냅샷 디코드 비용 (5초 창) — 횟수가 높으면 같은 프레임 중복 디코드
+      //   = 디코드 캐시가 가속화 후보라는 신호.
+      if (C(c).dec_n > 0) {
+        char db[96];
+        snprintf(db, sizeof(db), "⏱ decode ch%d: %d× / avg %.0fms (5s window)",
+                 c, C(c).dec_n, (double)C(c).dec_ms_sum / C(c).dec_n);
+        EmitEvent(c, db);
+        C(c).dec_ms_sum = 0;
+        C(c).dec_n = 0;
+      }
     }
     // ① 밀린 판독 회수 — Busy 직전에 저장돼 스킵된 쨍한 크롭 (정지차의 유일한 표)
-    if (pending_ocr_slot_[c] >= 0) {
-      int s = pending_ocr_slot_[c];
-      pending_ocr_slot_[c] = -1;
+    if (C(c).pending_ocr_slot >= 0) {
+      int s = C(c).pending_ocr_slot;
+      C(c).pending_ocr_slot = -1;
       RecognizePlate(c, s);
     }
     // ② 재판독 — 주차됐는데 번호 없으면 1.5초마다 마지막 저장크롭 재시도.
     //   단, 이번 세션(마지막 출차 이후)에 저장된 크롭만 — 이전 차의 유물 크롭을
     //   파오면 옛 번호가 되살아난다 (08-04 실측: 흰차 크롭으로 빨간차에 49허 재배정).
-    if (parking_.HasPlatelessOccupied(c) && last_save_ms_[c] > purge_ms_[c] &&
-        now_ms - reread_ms_[c] >= 1500) {
-      reread_ms_[c] = now_ms;
+    if (parking_.HasPlatelessOccupied(c) && C(c).last_save_ms > C(c).purge_ms &&
+        now_ms - C(c).reread_ms >= 1500) {
+      C(c).reread_ms = now_ms;
       int s = plate_store_.last_slot(c);
-      if (s >= 0 && s != futile_slot_[c]) RecognizePlate(c, s);  // 해결된 차 크롭은 제외
+      if (s >= 0 && s != C(c).futile_slot) RecognizePlate(c, s);  // 해결된 차 크롭은 제외
     }
     // ②b (제거) zone-ocr 구역 수색 — 저신뢰 환각 표(경기50배7794 류)만 만들어
     //    판독을 오염시켜 뺐다 (08-06 사용자 지시). 크롭이 전무하면 재도전 라운드가
@@ -1936,32 +2173,32 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     // ②c 재도전 라운드 — 표가 쌓였는데 결론이 없다 = 교착 (오독 다수결 점거·탄창 소진).
     //    투표함 폐기 + 프레임세대 리셋 → 백지에서 재수집. 라운드마다 지터로 결과가
     //    달라져, db-rescue 가능한 판독이 이기는 라운드에서 확정된다.
-    if (parking_.HasPlatelessOccupied(c) && now_ms - retry_ms_[c] >= 4000) {
-      retry_ms_[c] = now_ms;
+    if (parking_.HasPlatelessOccupied(c) && now_ms - C(c).retry_ms >= 4000) {
+      C(c).retry_ms = now_ms;
       int discarded = 0;
-      for (const auto& kv : plate_seen_[c]) {
-        if (plate_done_[c].count(kv.first)) continue;
+      for (const auto& kv : C(c).plate_seen) {
+        if (C(c).plate_done.count(kv.first)) continue;
         if (plate_vote_.Count(c, kv.first) >= 2) {
           int n; double cf; bool pm;
           plate_vote_.Finalize(c, kv.first, &n, &cf, &pm);  // 폐기 (결과 버림)
-          burst_ver_[c].erase(kv.first);
+          C(c).burst_ver.erase(kv.first);
           discarded++;
         }
       }
       // [good-shot 재수신] 크롭 중복제거 기억도 지운다 — 메타데이터에 계속 실려오는
       //   같은 ImageRef 를 새것처럼 다시 저장·판독 (WiseAI 재요청 API 의 대체, 08-05).
       //   단 마지막 크롭이 "이미 배정된 번호"로 판명(futile)됐으면 재수신 무의미 — 스킵.
-      bool futile = plate_store_.last_slot(c) == futile_slot_[c] && futile_slot_[c] >= 0;
+      bool futile = plate_store_.last_slot(c) == C(c).futile_slot && C(c).futile_slot >= 0;
       if (!futile) plate_store_.ForgetRefs(c);
       // [확정딱지 사면] 굶주리는데 추적 중인 번호판이 전부 plate_done 이면 — 이전 구역
       //   세션의 딱지가 유일한 재료를 막고 있는 것 (구역 재생성 후 교착 실측 08-06).
       //   칸이 번호를 기다리는 지금은 사면하고 다시 읽게 한다.
-      if (discarded == 0 && !plate_seen_[c].empty() && !plate_done_[c].empty()) {
+      if (discarded == 0 && !C(c).plate_seen.empty() && !C(c).plate_done.empty()) {
         bool all_done = true;
-        for (const auto& kv : plate_seen_[c])
-          if (!plate_done_[c].count(kv.first)) { all_done = false; break; }
+        for (const auto& kv : C(c).plate_seen)
+          if (!C(c).plate_done.count(kv.first)) { all_done = false; break; }
         if (all_done) {
-          plate_done_[c].clear();
+          C(c).plate_done.clear();
           EmitEvent(c, "🅿️ read starving — done-marks amnestied (reopen tracked plates)");
         }
       }
@@ -1974,22 +2211,37 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
     // ③ 조기개표 — 신뢰도 차는 순간 FINAL → 배정 (좌표 1차, 실패 시 빈칸 우선 폴백)
     //    (주기 재검증(10초 사면)은 폐지 — 완결 칸은 출차까지 완전 침묵이 원칙. 08-04)
     TryEarlyFinalize(c, now_ms);
+    // ③b [베스트 프레임] 주차 후에도 미확정이면 챔피언 재판독 (게이트 미달·더 나은 프레임)
+    if (park_tune_.best_frame_mode == 1 && parking_.HasPlatelessOccupied(c) &&
+        !C(c).best_finalized)
+      FinalizeBestFrame(c, now_ms);
   }
 
   // 늦게 써진 크롭 파일 재시도 (PlateStore, 최대 3초)
   std::string rev = plate_store_.RetryPending(ch, now_ms);
   if (!rev.empty()) {
     EmitEvent(ch, rev);
-    last_save_ms_[ch] = now_ms;  // [세션 경계] 이번 세션 크롭 표시
+    C(ch).last_save_ms = now_ms;  // [세션 경계] 이번 세션 크롭 표시
     RecognizePlate(ch, plate_store_.last_slot(ch));
   }
 
-  latest_[ch].swap(dets);  // 웹 오버레이가 읽어감 (움직이는 객체 + 그 번호판)
+  C(ch).latest.swap(dets);  // 웹 오버레이가 읽어감 (움직이는 객체 + 그 번호판)
 
   // 오래 안 보인 번호판 확정 — 전 채널을 훑는다. 영상이 끝난 채널은 메타데이터가
   // 끊겨 자기 tick 이 못 굴러가므로, 살아있는 다른 채널의 프레임이 시계를 대신 돌려준다.
   for (int c = 0; c < cfg::kChannels; ++c) FinalizeStalePlates(c, now_ms);
-  motion_[ch].PruneStale(tick);  // 오래 안 보인 객체 추적 제거
+  C(ch).motion.PruneStale(tick);  // 오래 안 보인 객체 추적 제거
+
+  // [계측] 프레임 처리시간 — 메타데이터 스레드에서 OCR/디코드가 도는 구조라, 여기가
+  //   길면 프레임 처리 자체가 밀린다 (가속화 1순위 후보 = 무거운 일 스레드 분리).
+  uint64_t frame_dt = NowMs() - t_frame0;
+  if (frame_dt >= 40 && NowMs() - C(ch).frame_warn_ms >= 5000) {
+    C(ch).frame_warn_ms = NowMs();
+    char fw_[96];
+    snprintf(fw_, sizeof(fw_), "⏱ frame ch%d took %llums — metadata thread blocked",
+             ch, (unsigned long long)frame_dt);
+    EmitEvent(ch, fw_);
+  }
 }
 
 // ---- DB 매칭 레이어 (stale/조기개표 공용) ----
@@ -2031,38 +2283,61 @@ const char* SampleComponent::ApplyDbLayer(std::string* fin, double fconf, bool* 
 //   (RecordFinal → 구역 배정 + EV 판정까지 기존 경로 그대로). 아직 부족하면
 //   투표함을 건드리지 않아 버스트 샘플이 계속 쌓인다 — "차가 있는 동안 계속 시도".
 void SampleComponent::TryEarlyFinalize(int ch, uint64_t now_ms) {
-  for (const auto& kv : plate_seen_[ch]) TryFinalizeOid(ch, kv.first, now_ms);
+  for (const auto& kv : C(ch).plate_seen) TryFinalizeOid(ch, kv.first, now_ms);
 }
 
 // 한 대(oid)만 즉석 심사 — 표 추가 직후 호출 (plate_seen_ 목록에 없어도 동작).
 //   정지 장면에선 추적 목록이 비어 조기개표 루프가 투표함을 영영 안 열었다 (08-04
 //   실측: 재판독 0.99 표가 4장 쌓여도 무결론). 넣는 손이 바로 개표까지 한다.
 bool SampleComponent::TryFinalizeOid(int ch, long oid, uint64_t now_ms) {
-  if (plate_done_[ch].count(oid)) return false;   // 이미 확정된 차
+  if (C(ch).plate_done.count(oid)) return false;   // 이미 확정된 차
   int nvotes = 0; double fconf = 0.0; bool fprim = false;
   std::string fin = plate_vote_.Peek(ch, oid, &nvotes, &fconf, &fprim);
+  // [가속 08-10] 등록차 정확일치 즉시확정 — 첫 표가 고신뢰(≥0.97)이고 그 텍스트가
+  //   등록부에 "정확히" 존재하면 2표 합의를 안 기다린다 (등록부가 두 번째 증인 역할
+  //   → 판독 다리 ~0.3–0.6초 단축). 미등록·저신뢰·근사 매칭은 기존 합의제 그대로 —
+  //   정확도 무손상 원칙: 오확정하려면 고신뢰 오독이 "다른" 등록 번호와 자모까지
+  //   정확히 일치해야 하는데, 소규모 명부에선 그 확률이 합의제 오확정보다 낮다.
+  bool db_instant = false;
+  if ((fin.empty() || nvotes < 2) && plate_db_ready_) {
+    std::string t, dbtxt;
+    double c = 0.0;
+    if (plate_vote_.BestSample(ch, oid, &t, &c) && c >= 0.97 &&
+        plate_db_.Match(t, &dbtxt) == 1 && dbtxt == t) {
+      fin = t;
+      fconf = c;
+      db_instant = true;
+    }
+  }
   if (fin.empty()) return false;
-  if (nvotes < 2) return false;  // [합의제] 단발 오독 방지 — 연사 중이라 2표는 ~0.6초
-  bool trusted = fconf >= cfg::kFinalConfFloor;
+  // [베스트 프레임 모드] 챔피언 primary 1장은 합의 면제 — "최고 프레임 1장만 판독"이
+  //   설계 자체라 2표 대기가 불가능하다. fconf 게이트(0.95)가 오독을 막는다.
+  bool best_primary = park_tune_.best_frame_mode == 1 && fprim;
+  if (nvotes < 2 && !db_instant && !best_primary) return false;  // [합의제] 단발 오독 방지
+  bool trusted = db_instant || fconf >= cfg::kFinalConfFloor;
   const char* dbtag = ApplyDbLayer(&fin, fconf, &trusted);
   if (!trusted) return false;                     // 증거 부족 — 다음 표에서 재심사
+  if (db_instant && dbtag[0] == '\0') dbtag = ", db-instant";
+  int show_n = nvotes > 0 ? nvotes : 1;           // 표시용 (Finalize 가 변수 덮어씀)
+  double show_conf = fconf;
+  bool show_prim = fprim;
   plate_vote_.Finalize(ch, oid, &nvotes, &fconf, &fprim);  // 확정 — 이제 투표함 비움
   // [완결 재확인] 이 번호가 이미 이 채널 칸에 붙어 있으면 — 조용히 갱신만 하고 끝.
   //   (재검증 창에서 같은 번호 재확인 = 정상. FINAL/EV 로그 도배 방지, 08-04 실측)
   if (parking_.HasPlate(ch, fin)) {
-    plate_done_[ch].insert(oid);
-    auto pp = plate_pos_[ch].find(oid);
-    if (pp != plate_pos_[ch].end())
+    C(ch).plate_done.insert(oid);
+    auto pp = C(ch).plate_pos.find(oid);
+    if (pp != C(ch).plate_pos.end())
       parking_.AssignAt(ch, pp->second.first, pp->second.second, fin, -1, "", "", now_ms);
     return true;
   }
-  last_final_[ch] = fin;
+  C(ch).last_final = fin;
   RecordFinal(ch, fin, now_ms, oid);              // 구역 배정 + EV 연쇄
-  plate_done_[ch].insert(oid);                    // stale 경로의 이중판정 방지
+  C(ch).plate_done.insert(oid);                    // stale 경로의 이중판정 방지
   char m[256];
   snprintf(m, sizeof(m), "%s★ PLATE FINAL ch%d id%ld -> \"%s\" (early/parked, best-of-%d, conf %.2f, src=%s%s)%s",
-           Hl(cfg::kAnsiFinal), ch, oid, fin.c_str(), nvotes, fconf,
-           fprim ? "good-shot" : "burst", dbtag, Hl(cfg::kAnsiReset));
+           Hl(cfg::kAnsiFinal), ch, oid, fin.c_str(), show_n, show_conf,
+           show_prim ? "good-shot" : "burst", dbtag, Hl(cfg::kAnsiReset));
   EmitEvent(ch, m);
   return true;
 }
@@ -2071,8 +2346,8 @@ bool SampleComponent::TryFinalizeOid(int ch, long oid, uint64_t now_ms) {
 //   [②버스트 승격] good-shot/버스트 무관, 유효포맷 중 conf 최고가 승리 (Q45 우회 크롭의 역전 허용)
 //   만료 = 그 채널 프레임 기준(kStaleFrames) OR 벽시계 기준(kStaleMs) — 채널이 조용해져도 확정됨.
 void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
-  uint64_t tick = tick_[ch];
-  for (auto it = plate_seen_[ch].begin(); it != plate_seen_[ch].end();) {
+  uint64_t tick = C(ch).tick;
+  for (auto it = C(ch).plate_seen.begin(); it != C(ch).plate_seen.end();) {
     // good-shot 크롭은 최대 3초 늦게 써짐(RetryPending) → primary 샘플이 아직 없으면
     // stale 유예를 3배로 늘려 기다린다 (버스트 환각만으로 조기 오답 FINAL 방지, id9595 실측)
     bool has_primary = plate_vote_.HasPrimary(ch, it->first);
@@ -2080,14 +2355,14 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
     uint64_t grace_ms = has_primary ? cfg::kStaleMs : cfg::kStaleMs * 3;
     if (it->second.tick + grace < tick || it->second.ms + grace_ms < now_ms) {
       // 즉시확정으로 이미 판정이 끝난 차 — 조용히 정리만 (이중판정 방지)
-      if (plate_done_[ch].erase(it->first)) {
-        stack_acc_[ch].erase(it->first);
-        it = plate_seen_[ch].erase(it);
+      if (C(ch).plate_done.erase(it->first)) {
+        C(ch).stack_acc.erase(it->first);
+        it = C(ch).plate_seen.erase(it);
         continue;
       }
       // [스태킹] 확정 직전, 이 차의 버스트 평균본(노이즈 √N 상쇄)으로 마지막 1표 시도
-      auto sa = stack_acc_[ch].find(it->first);
-      if (sa != stack_acc_[ch].end()) {
+      auto sa = C(ch).stack_acc.find(it->first);
+      if (sa != C(ch).stack_acc.end()) {
         if (sa->second.n >= cfg::kStackMinFrames && plate_ocr_ready_) {
           cv::Mat avg8;
           sa->second.sum.convertTo(avg8, CV_8U, 1.0 / sa->second.n);
@@ -2102,7 +2377,7 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
             EmitEvent(ch, sm);
           }
         }
-        stack_acc_[ch].erase(sa);
+        C(ch).stack_acc.erase(sa);
       }
 
       int nvotes = 0; double fconf = 0.0; bool fprim = false;
@@ -2111,7 +2386,7 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
         // conf 하한 미달이면 FINAL 대신 HOLD — 시스템에 확정값으로 넘기지 않고 로그만 남긴다.
         bool trusted = fconf >= cfg::kFinalConfFloor;
         const char* dbtag = ApplyDbLayer(&fin, fconf, &trusted);  // DB 교정/회수 (공용)
-        if (trusted) { last_final_[ch] = fin; RecordFinal(ch, fin, now_ms, it->first); }
+        if (trusted) { C(ch).last_final = fin; RecordFinal(ch, fin, now_ms, it->first); }
         char m[256];
         snprintf(m, sizeof(m), "%s%s PLATE %s ch%d id%ld -> \"%s\" (best-of-%d, conf %.2f, src=%s%s)%s",
                  Hl(trusted ? cfg::kAnsiFinal : cfg::kAnsiWarn), trusted ? "★" : "?",
@@ -2121,11 +2396,11 @@ void SampleComponent::FinalizeStalePlates(int ch, uint64_t now_ms) {
         // FINAL 로 끝난 차는 늦게 도착하는 good-shot 재판독을 막는다 (이중 FINAL 방지).
         // HOLD 는 일부러 안 막음 — 늦은 good-shot 1.00 이 오면 승격 기회를 준다.
         if (trusted) {
-          plate_done_[ch].insert(it->first);
-          if (plate_done_[ch].size() > 256) plate_done_[ch].clear();  // oid 는 재사용 안 됨 — 폭주만 방지
+          C(ch).plate_done.insert(it->first);
+          if (C(ch).plate_done.size() > 256) C(ch).plate_done.clear();  // oid 는 재사용 안 됨 — 폭주만 방지
         }
       }
-      it = plate_seen_[ch].erase(it);
+      it = C(ch).plate_seen.erase(it);
     } else {
       ++it;
     }

@@ -26,16 +26,34 @@ struct ParkTune {
   uint64_t presence_period_ms = 1500;  // 육안검증 검사 간격
   double presence_conf = 0.60;         // 검증 "판 잔존" 인정 최소 conf (+ 번호 유사성)
   double burst_margin = 0.35;          // 버스트 사거리 — 칸 bbox 확장 비율
+  int best_frame_mode = 1;             // 1=베스트 프레임 모드(08-11): 진입~주차 동안 버스트
+                                       //   크롭 sharp×크기 점수만 기록, 주차완료 시 챔피언 1장만
+                                       //   OCR. 0=끔(기존 매프레임 합의 판독).
+  double best_min_sharp = 150;         // [쓰레기 필터 08-11] 이 선명도(라플라시안 분산) 미만
+                                       //   크롭은 챔피언 후보에서 제외 + 갤러리 저장 안 함. 심한
+                                       //   블러(멀리·초점나감)를 최종 OCR 에서 배제. 다 미달이면
+                                       //   판독 보류(빈 챔피언). 0=끔.
+                                       //   ★기본 600 은 너무 빡세 실크롭(실측 sharp≈488)까지 죽여
+                                       //   전량 starving 실측(08-11) → 150 으로. 순수 쓰레기(≈300)
+                                       //   와 실크롭 사이. 패널/‌API 로 현장 조정.
+  double best_min_aspect = 2.0;        // [쓰레기 필터] 가로/세로 비율 하한 — 판이 아닌 오크롭
+                                       //   (로고·배경, 정사각에 가까움) 제외. 실판 크롭은 2.5~3+.
+  uint64_t goodshot_grace_ms = 0;      // 판독 시작 후 이만큼 버스트 보류(굿샷 우선). 기본 0=끔:
+                                       //   진입부터 우리 스냅샷 캡처를 돌린다 (WiseAI 굿샷은
+                                       //   크롭 모양이 깨져 오히려 해로움 — 08-11 실측). 굿샷을
+                                       //   기다려보고 싶으면 이 값을 올려 실험 (패널에서 즉시).
   // ---- 직렬화 ----------------------------------------------------------
   std::string ToJson() const {
     char b[320];
     snprintf(b, sizeof(b),
              "{\"overlap\":%.2f,\"dwell_ms\":%llu,\"grace_ms\":%llu,"
              "\"exit_cover\":%.2f,\"presence_miss\":%d,\"presence_period_ms\":%llu,"
-             "\"presence_conf\":%.2f,\"burst_margin\":%.2f}",
+             "\"presence_conf\":%.2f,\"burst_margin\":%.2f,\"goodshot_grace_ms\":%llu,"
+             "\"best_frame_mode\":%d,\"best_min_sharp\":%.0f,\"best_min_aspect\":%.2f}",
              overlap, (unsigned long long)dwell_ms, (unsigned long long)grace_ms,
              exit_cover, presence_miss, (unsigned long long)presence_period_ms,
-             presence_conf, burst_margin);
+             presence_conf, burst_margin, (unsigned long long)goodshot_grace_ms,
+             best_frame_mode, best_min_sharp, best_min_aspect);
     return b;
   }
 
@@ -51,6 +69,10 @@ struct ParkTune {
     any |= NumU(body, "presence_period_ms", 500, 10000, &presence_period_ms);
     any |= Num(body, "presence_conf", 0.30, 0.95, &presence_conf);
     any |= Num(body, "burst_margin", 0.0, 1.0, &burst_margin);
+    any |= NumU(body, "goodshot_grace_ms", 0, 10000, &goodshot_grace_ms);
+    any |= NumI(body, "best_frame_mode", 0, 1, &best_frame_mode);
+    any |= Num(body, "best_min_sharp", 0, 10000, &best_min_sharp);
+    any |= Num(body, "best_min_aspect", 0, 10, &best_min_aspect);
     return any;
   }
 

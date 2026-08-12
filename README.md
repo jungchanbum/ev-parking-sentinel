@@ -28,6 +28,18 @@
 
 - 판독은 **주차구역 근처(칸 bbox+35%) 번호판만** — 화면 반대편(모니터·옆 차선) 오배정 원천 차단
 - 미등록 판독은 빈 칸만 채우고 기존 확정 번호를 **교체할 수 없음** (저품질 크롭 오염 방지)
+- **베스트 프레임 모드**(`best_frame_mode=1`, 옵션): 진입~주차 동안 버스트 크롭의 sharp×크기 챔피언
+  1장만 주차 확정 순간 OCR. 채널당 1대 전제 — **여러 대 동시**엔 0(차별 투표)으로 둘 것
+- **쓰레기 크롭 필터**: 선명도(`best_min_sharp`)·가로비율(`best_min_aspect`) 미달 크롭은 최종 OCR 제외
+  (블러·로고 오크롭이 환각 번호를 뱉는 것 차단 — 문턱은 실측 분포 기준으로 패널에서 조정)
+
+### ★ 모형(토이카) 리그의 제1 조건 — 번호판 폰트
+
+**모형 판은 반드시 실판 글리프(각진 전용 서체)로 인쇄해야 한다** (2026-08-11 확정 실측).
+tinyLPR 는 실제 한국 번호판 폰트로만 학습돼, 둥근 범용 폰트 인쇄물은 sharp 2000+ 로 선명해도
+체계적으로 오독한다(9→0, 서→거). 반대로 실판 글리프는 강블러·저해상·원근왜곡에도 정독
+(같은 판을 폰트만 바꿔 conf 0.80 오독 → **conf 1.00 정독** 실측). 초점·크롭·후처리보다 폰트가 먼저다.
+인쇄 시트 생성: `ocr_lab` 의 `make_plate_sheet.py` (실판 글리프·실판 비율·색상별).
 
 ## 주차 · 위반 판정 (상태기계)
 
@@ -57,8 +69,9 @@
 
 ## 전기차 판정
 
-- **등록차**: `registered_plates.txt` 의 `,ev` 플래그 (등록 시점에 `tools/ev_lookup.py` 로 확정)
-- **미등록차**: 카메라가 [ev.or.kr](https://ev.or.kr) 무공해차 조회를 직접 수행 (popen curl — 앱 내 TLS 즉사 회피)
+- **모든 차량이 ev.or.kr 실조회** — 등록차도 예외 없음 (카메라가 popen curl 로 직접 조회;
+  앱 내 TLS 는 즉사라 자식 프로세스 우회). 명부의 `,ev` 플래그는 **조회 실패 시 폴백**일 뿐
+- 명부(`registered_plates.txt`)의 역할은 **번호 교정(오독 회수)** — EV 판정의 출처가 아니다
 - 판 색으로 판정하지 않는다 — 법인 전기차는 연두판이라 "파랑=EV" 규칙은 틀림
 
 ```bash
@@ -68,8 +81,9 @@ curl --digest -u admin:*** "http://<IP>/opensdk/object_detect/isev?plate=42주01
 
 ## 런타임 튜닝 — 빌드 없이 파라미터 실험
 
-주차 판정 파라미터 8종(겹침 문턱·확정 대기·부재 유예·이탈 문턱·육안검증 횟수/주기/conf·버스트 사거리)을
-`GET/POST /parking_tune` 으로 즉시 조정 — 부분 갱신·범위 검증·영속화. 앱 웹 UI의 **⚙️ 판정 튜닝 패널**에서도 조작 가능.
+주차 판정 파라미터 12종(겹침 문턱·확정 대기·부재 유예·이탈 문턱·육안검증 횟수/주기/conf·버스트 사거리·
+굿샷 우선·베스트프레임 on/off·최소 선명도·최소 가로비율)을 `GET/POST /parking_tune` 으로 즉시 조정 —
+부분 갱신·범위 검증·영속화(재설치에도 유지). 앱 웹 UI의 **⚙️ 판정 튜닝 패널**에서도 조작 가능.
 튜닝 사이클: 재빌드+설치 10분 → **3초**.
 
 ## 빌드 / 배포
@@ -82,6 +96,17 @@ SDK_VER=26.05.19 SOC=cv5 APP_NAME=object_detect docker compose up   # → object
 - **수칙: 영상 정지 + 카메라 재부팅 직후 설치** — 연속 설치 시 조용한 반쯤-설치 오염 (Status=Running인데 HTTP 전부 500; 물리 재부팅으로만 회복)
 - 앱 ID는 `object_detect` 유지 (레포 이름과 별개 — 카메라 설치 식별자)
 - 카메라 화질·AI 설정 골든 파라미터: [config/CAMERA_SETTINGS.md](config/CAMERA_SETTINGS.md) (복원 명령 포함)
+
+## 디버깅 — 실시간 이벤트 보기
+
+| 방법 | 비고 |
+|---|---|
+| `CLI/remote_debug_viewer/app/bin/remote_debug_viewer object_detect` | SDK 원격 뷰어. **앱 스켈레톤 포트 고정(8590)이 전제** — `app/src/PLifeCycleManagermanifest.json` 의 `SkeletonPortNumber: 8590` 과 뷰어 설정의 object_detect PortNumber 가 일치해야 연결. `auto` 면 뷰어가 포트를 몰라 `port # 0` 실패 |
+| `GET /eventlog` | 같은 이벤트를 HTTP 로 — 포트 설정 불필요, 항상 동작 |
+| `CLI/watch_events.sh` | `/eventlog` 를 1초 tail + 판독/FINAL/위반 색 강조 (WSL) |
+
+주의: 매니페스트는 빌드가 **`app/src/`(원본) → `app/bin/`** 으로 재생성한다.
+포트 등 매니페스트 수정은 반드시 `app/src/` 쪽에 — `app/bin/` 만 고치면 다음 빌드가 되돌린다.
 
 ## HTTP API (주요)
 

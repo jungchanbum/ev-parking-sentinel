@@ -48,6 +48,22 @@ class PlateVote {
     return it == map_.end() ? 0 : (int)it->second.samples.size();
   }
 
+  // [가속 08-10] 단일 최고표 조회 — "등록차 정확일치 즉시확정"용. 챔피언십(2표 합의)을
+  //   기다리기 전, 유효포맷 중 conf 최고 샘플 하나를 꺼내 호출측이 등록부와 대조한다.
+  //   (판정 권한은 호출측 DB 정확일치가 담당 — 여기는 조회만.)
+  bool BestSample(int ch, long oid, std::string* text, double* conf) const {
+    auto it = map_.find(Key(ch, oid));
+    if (it == map_.end()) return false;
+    const Sample* best = nullptr;
+    for (const auto& s : it->second.samples)
+      if (plate_decode::ValidPlateFormat(s.text) && (!best || s.conf > best->conf))
+        best = &s;
+    if (!best) return false;
+    *text = best->text;
+    *conf = best->conf;
+    return true;
+  }
+
   // 투표함에 text 와 다른 텍스트가 min_conf 이상으로 이미 들어와 있는가.
   //   즉시확정 발사 전 충돌 검사용 — 버스트가 먼저 정답 0.98 을 내놨는데 good-shot
   //   오독 0.99 가 그걸 무시하고 즉시확정한 사고(22소2542) 봉합.

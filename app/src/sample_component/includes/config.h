@@ -61,14 +61,24 @@ constexpr double kUnsharpSigma  = 1.5;    // 블러 반경 px
 // 08-04 재완화: 주차 리그에서 카메라 ImageRef 크롭이 88~176px 폭으로 와서 전량 스킵
 //   → 같은 판을 버스트(123x110)는 conf 0.98 로 잘 읽음(실측). upscale 구간이어도
 //   시도는 하게 풀고, 오확정은 0.95 게이트·버스트 캡·DB 그물이 막는다.
-constexpr int kMinOcrCropWidth = 80;
-constexpr int kMinOcrCropHeight = 60;
+constexpr int kMinOcrCropWidth = 64;
+constexpr int kMinOcrCropHeight = 44;   // 08-12 완화: 멀리/작은 토이판 good-shot 이 120x48 로 와서
+                                        //   높이 60 에 걸려 전량 스킵(실측) → 버스트는 같은 48px 를
+                                        //   conf 0.9+ 로 읽음. "조금만 여유롭게"(사용자) — 44 로.
+                                        //   더 작아지면 환각↑ 이니 여기가 실용 하한.
+
+// good-shot 블러 하한 (라플라시안 분산). good-shot 척도: 정상 100~366·물렁 10~13.
+//   이 미만은 최종 OCR 스킵 — 심한 블러가 환각 번호를 뱉는 것 차단 (08-11 사용자 요청).
+constexpr double kGoodshotMinSharp = 40.0;
 
 // 크롭 좌우 반전 보정: true 면 판독 직전 크롭을 수평으로 뒤집는다.
 //   근본 원인은 카메라(채널/센서 플립)지만, 카메라에서 못 끄는 경우의 코드 보정.
 //   2026-08-03 실측: 재부팅 후 번호판 영상이 좌우 반전된 채널로 잡혀 OCR 전량 오독
 //   (cap_ 크롭이 거울상). 정상(비반전) 채널로 돌아가면 반드시 false 로.
-constexpr bool kFlipCropH = true;
+constexpr bool kFlipCropH = true;    // 2026-08-11 재확정: 원본 스냅샷에서 푸조 로고·번호판이
+                                     //   좌우 반전 → 카메라 센서가 거울상. 크롭은 뒤집어야 정방향.
+                                     //   (낮에 잠깐 false 로 뒤집었다가 오히려 전량 거울상 OCR →
+                                     //    복구. 스냅샷 로고 반전이 명백한 근거.)
 
 // ===== 번호판 숫자 인식(OCR) 모델 경로 =====
 //   PC(ocr_lab)에서 검증한 tinyLPR 단독 (Multi-line 은 기여 0 실측으로 제거 — 경량화).

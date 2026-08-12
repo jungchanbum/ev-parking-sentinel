@@ -75,6 +75,18 @@ class PlateStore {
   const int* saved_ch() const { return saved_ch_; }
   // 그 채널이 방금 쓴 슬롯 번호 — OCR 이 cap_<slot>.jpg 를 읽어들일 때 사용.
   int last_slot(int ch) const { return (ch >= 0 && ch < cfg::kChannels) ? last_slot_[ch] : -1; }
+
+  // [갤러리] 임의 JPEG(버스트/베스트프레임 크롭 등)를 다음 링 슬롯에 저장 — /plate?n= 확인용.
+  //   ImageRef 경로와 무관하게 "OCR 에 실제 들어간 크롭"을 눈으로 보게 하는 진단 저장.
+  int SaveDebugImage(int ch, const std::string& jpg) {
+    if (jpg.empty()) return -1;
+    int slot = total_ % cfg::kRingSize;
+    WritePair(jpg, slot);
+    last_slot_[ch] = slot;
+    total_++;
+    if (ch >= 0 && ch < cfg::kChannels) saved_ch_[ch]++;
+    return slot;
+  }
   // 그 슬롯의 번호판 객체 id — good-shot OCR 결과를 시간투표에 합류시킬 때 사용.
   long last_oid(int ch) const { return (ch >= 0 && ch < cfg::kChannels) ? last_oid_[ch] : 0; }
 
