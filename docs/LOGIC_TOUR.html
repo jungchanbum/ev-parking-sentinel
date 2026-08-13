@@ -1,0 +1,426 @@
+<title>edge-parking-lpr 동작 원리 — 로직 전해부</title>
+<style>
+  :root{
+    --paper:#f6f8fa; --card:#ffffff; --ink:#182430; --muted:#5b6b78;
+    --line:#d6dee6; --accent:#1e7fbf; --accent-soft:#e3f0f9;
+    --ok:#1e8a5a; --ok-soft:#e2f3ea; --warn:#c23b3b; --warn-soft:#f9e7e7;
+    --code-bg:#eef2f6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#10171f; --card:#182230; --ink:#e6edf3; --muted:#93a4b3;
+      --line:#2c3a49; --accent:#5bb1e8; --accent-soft:#173044;
+      --ok:#4cc290; --ok-soft:#12301f; --warn:#e57373; --warn-soft:#3a1d1d;
+      --code-bg:#111a24;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#10171f; --card:#182230; --ink:#e6edf3; --muted:#93a4b3;
+    --line:#2c3a49; --accent:#5bb1e8; --accent-soft:#173044;
+    --ok:#4cc290; --ok-soft:#12301f; --warn:#e57373; --warn-soft:#3a1d1d;
+    --code-bg:#111a24;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",sans-serif;
+    line-height:1.75; margin:0; padding:0 20px 80px;
+  }
+  main{max-width:920px; margin:0 auto}
+  header{padding:56px 0 8px; border-bottom:2px solid var(--ink); margin-bottom:8px}
+  .eyebrow{font-size:12px; letter-spacing:.18em; color:var(--accent); font-weight:700; text-transform:uppercase}
+  h1{font-size:clamp(26px,4.5vw,38px); margin:.25em 0 .2em; line-height:1.25; text-wrap:balance; font-weight:800}
+  .sub{color:var(--muted); margin:0 0 26px; max-width:64ch}
+  h2{font-size:22px; margin:2.6em 0 .5em; font-weight:800; text-wrap:balance}
+  h2 .no{color:var(--accent); font-variant-numeric:tabular-nums; margin-right:.45em}
+  h3{font-size:16.5px; margin:1.8em 0 .4em; font-weight:700}
+  p{margin:.55em 0; max-width:72ch}
+  figure{margin:20px 0; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px 16px 10px; overflow-x:auto}
+  figcaption{font-size:13px; color:var(--muted); margin-top:8px; max-width:78ch}
+  svg{max-width:100%; height:auto; display:block; margin:0 auto}
+  svg text{font-family:"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+  code,pre{font-family:Consolas,"D2Coding",monospace}
+  code{background:var(--code-bg); border-radius:4px; padding:.08em .35em; font-size:.9em}
+  pre{background:var(--code-bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; font-size:12.5px; line-height:1.65; overflow-x:auto}
+  table{border-collapse:collapse; width:100%; font-size:14px; margin:14px 0}
+  th,td{border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top}
+  th{background:var(--code-bg); font-weight:700}
+  td.num{font-variant-numeric:tabular-nums; white-space:nowrap}
+  .pill{display:inline-block; border-radius:99px; padding:.06em .6em; font-size:.85em; font-weight:700}
+  .pill.ok{background:var(--ok-soft); color:var(--ok)}
+  .pill.warn{background:var(--warn-soft); color:var(--warn)}
+  .pill.acc{background:var(--accent-soft); color:var(--accent)}
+  .note{border-left:3px solid var(--accent); background:var(--accent-soft); padding:10px 14px; border-radius:0 8px 8px 0; margin:16px 0; max-width:76ch}
+  .note.warn{border-color:var(--warn); background:var(--warn-soft)}
+  ul{padding-left:1.3em}
+  li{margin:.28em 0}
+  .lesson{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:12px; margin:16px 0}
+  .lesson>div{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px}
+  .lesson b{display:block; margin-bottom:4px}
+  .lesson small{color:var(--muted)}
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">edge-parking-lpr · object_detect</div>
+  <h1>카메라 안에서 완결되는 주차 관제 — 동작 원리 전해부</h1>
+  <p class="sub">Hanwha PNM-C16083RVQ(4센서, CV5) 위에서 서버 없이 도는 OpenSDK 앱.
+  번호판 인식 → 주차 판정 → 전기차 실조회 → 위반 판단까지 카메라 내부에서 끝내고,
+  외부(Pi·Qt)는 결과만 받아 쓴다. 원칙은 하나 — <b>"틀리게 확정하느니 침묵한다."</b></p>
+</header>
+
+<h2><span class="no">0</span>한눈 요약</h2>
+<figure>
+<svg viewBox="0 0 920 190" role="img" aria-label="차량 진입부터 외부 통지까지의 전체 파이프라인 — 벨이 울리면 XML을 읽는다">
+  <defs><marker id="a0" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="10" y="60" width="92" height="46" rx="8"/>
+    <rect x="148" y="60" width="136" height="46" rx="8"/>
+    <rect x="330" y="24" width="248" height="120" rx="10" stroke="var(--accent)" stroke-width="2"/>
+    <rect x="346" y="40" width="98" height="30" rx="6"/>
+    <rect x="460" y="40" width="102" height="30" rx="6"/>
+    <rect x="346" y="98" width="98" height="30" rx="6"/>
+    <rect x="460" y="98" width="102" height="30" rx="6"/>
+    <rect x="636" y="62" width="98" height="46" rx="8"/>
+    <rect x="806" y="62" width="104" height="46" rx="8"/>
+    <line x1="102" y1="83" x2="140" y2="83" marker-end="url(#a0)"/>
+    <line x1="284" y1="83" x2="322" y2="83" marker-end="url(#a0)"/>
+    <line x1="578" y1="85" x2="628" y2="85" marker-end="url(#a0)"/>
+    <line x1="734" y1="85" x2="798" y2="85" marker-end="url(#a0)"/>
+    <line x1="444" y1="55" x2="452" y2="55" marker-end="url(#a0)"/>
+    <line x1="395" y1="70" x2="395" y2="90" marker-end="url(#a0)"/>
+    <line x1="444" y1="113" x2="452" y2="113" marker-end="url(#a0)"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="56" y="88">차량 진입</text>
+    <text x="216" y="81">WiseAI (NPU)</text>
+    <text x="216" y="97" font-size="11" fill="var(--muted)">감지·추적·크롭</text>
+    <text x="395" y="60">OCR 판독</text>
+    <text x="511" y="60">3단 판정</text>
+    <text x="395" y="118">주차 판정</text>
+    <text x="511" y="118">EV·위반</text>
+    <text x="454" y="16" font-weight="700" fill="var(--accent)">object_detect 앱 (2코어)</text>
+    <text x="685" y="81" font-size="11.5">벨 (푸시)</text>
+    <text x="685" y="96" font-size="10.5" fill="var(--muted)">eventstatus</text>
+    <text x="858" y="81" font-size="11.5">서류철 (풀)</text>
+    <text x="858" y="96" font-size="10.5" fill="var(--muted)">/parking_status</text>
+    <text x="119" y="72" font-size="10.5" fill="var(--muted)">영상</text>
+    <text x="303" y="72" font-size="10.5" fill="var(--muted)">XML 30fps</text>
+    <text x="603" y="74" font-size="10.5" fill="var(--muted)">불리언</text>
+    <text x="766" y="63" font-size="10.5" fill="var(--muted)">울리면</text>
+    <text x="766" y="76" font-size="10.5" fill="var(--muted)">XML 읽기</text>
+  </g>
+</svg>
+<figcaption>감지·추적·베스트샷은 카메라(WiseAI, NPU)가, 판독·판정은 앱(CPU 2코어)이 맡는다.
+외부는 "벨이 울리면 서류철(XML)을 읽는" 2채널로 결과만 소비한다.</figcaption>
+</figure>
+
+<h2><span class="no">1</span>판독 재료 — 크롭 2경로</h2>
+<p>앱은 번호판 이미지를 <b>두 경로</b>로 얻는다. WiseAI가 잘라주는 <b>good-shot</b>(ImageRef)과,
+앱이 풀해상 스냅샷에서 라이브 bbox로 직접 자르는 <b>버스트</b>. 카메라 센서가 거울상이라
+두 경로 모두 판독 직전 <b>좌우 반전 보정</b>(<code>kFlipCropH</code>)을 거친다.</p>
+<figure>
+<svg viewBox="0 0 880 330" role="img" aria-label="good-shot과 버스트 두 크롭 경로가 OCR과 투표함으로 합쳐지는 흐름">
+  <defs><marker id="a1" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="330" y="14" width="220" height="44" rx="8"/>
+    <rect x="60" y="112" width="230" height="52" rx="8"/>
+    <rect x="590" y="112" width="230" height="52" rx="8"/>
+    <rect x="330" y="196" width="220" height="44" rx="8" stroke="var(--accent)" stroke-width="2"/>
+    <rect x="352" y="272" width="176" height="42" rx="8"/>
+    <line x1="382" y1="58" x2="196" y2="106" marker-end="url(#a1)"/>
+    <line x1="498" y1="58" x2="684" y2="106" marker-end="url(#a1)"/>
+    <line x1="196" y1="164" x2="392" y2="192" marker-end="url(#a1)"/>
+    <line x1="684" y1="164" x2="488" y2="192" marker-end="url(#a1)"/>
+    <line x1="440" y1="240" x2="440" y2="266" marker-end="url(#a1)"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="440" y="33">WiseAI 메타데이터 (30fps)</text>
+    <text x="440" y="49" font-size="11" fill="var(--muted)">번호판 객체: bbox + ImageRef</text>
+    <text x="175" y="132">good-shot (정예 1장)</text>
+    <text x="175" y="149" font-size="11" fill="var(--muted)">ImageRef JPEG → 링버퍼 저장</text>
+    <text x="705" y="132">버스트 (물량 3장+)</text>
+    <text x="705" y="149" font-size="11" fill="var(--muted)">스냅샷 2592×1520 + bbox 자체크롭</text>
+    <text x="440" y="215">좌우반전 보정 → tinyLPR OCR</text>
+    <text x="440" y="231" font-size="11" fill="var(--muted)">87KB TFLite · 192×96 · CTC</text>
+    <text x="440" y="291">차(oid)별 투표함</text>
+    <text x="440" y="307" font-size="11" fill="var(--muted)">굿샷 primary 표 + 버스트 표</text>
+    <text x="256" y="80" font-size="10.5" fill="var(--muted)">크롭 경로 전달</text>
+    <text x="628" y="80" font-size="10.5" fill="var(--muted)">bbox 좌표</text>
+    <text x="268" y="188" font-size="10.5" fill="var(--muted)">크기·모양·블러 검문 통과분만</text>
+    <text x="618" y="188" font-size="10.5" fill="var(--muted)">conf&lt;0.90 환각 폐기</text>
+  </g>
+</svg>
+<figcaption>두 경로가 같은 OCR로 수렴하고, 결과는 차량(oid)별 투표함에 쌓인다.
+크기(64×44 미만)·모양(가로비 2.2 미만)·블러(sharp 하한) 검문에 걸린 크롭은 판독 자체를 거른다 — 쓰레기 입력이 환각 번호를 만드는 것을 원천 차단.</figcaption>
+</figure>
+
+<div class="note">
+<b>베스트 프레임 모드</b> (<code>best_frame_mode=1</code>, 옵션): 진입~주차 동안 버스트 크롭을 OCR하지 않고
+sharp×√면적 점수만 매겨 <b>챔피언 1장</b>을 보관, 주차 확정 순간 그 1장만 정독한다.
+채널당 1대 전제의 저부하 모드 — <b>여러 대 동시 인식엔 0(투표 모드)</b>으로 둘 것.
+</div>
+
+<h2><span class="no">2</span>OCR 엔진 내부 — 한 장을 읽는 법</h2>
+<p><code>Recognize()</code> 한 함수가 파이프라인 전체다. 핵심 헌법: <b>"선택 이후 conf를 올리는
+모든 가공은 0.94 캡"</b> — 가공본이 오답을 게이트(0.95) 위로 부스트한 사고가 4번 반복된 뒤 세운 규칙.</p>
+<figure>
+<svg viewBox="0 0 880 150" role="img" aria-label="OCR 내부 단계: 색 분류, 4후보 토너먼트, 지터, 조도, 디블러">
+  <defs><marker id="a2" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="12" y="40" width="120" height="52" rx="8"/>
+    <rect x="176" y="40" width="150" height="52" rx="8" stroke="var(--accent)" stroke-width="2"/>
+    <rect x="370" y="40" width="130" height="52" rx="8"/>
+    <rect x="544" y="40" width="130" height="52" rx="8"/>
+    <rect x="718" y="40" width="130" height="52" rx="8"/>
+    <line x1="132" y1="66" x2="168" y2="66" marker-end="url(#a2)"/>
+    <line x1="326" y1="66" x2="362" y2="66" marker-end="url(#a2)"/>
+    <line x1="500" y1="66" x2="536" y2="66" marker-end="url(#a2)"/>
+    <line x1="674" y1="66" x2="710" y2="66" marker-end="url(#a2)"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="72" y="61">판 색 분류</text>
+    <text x="72" y="78" font-size="10.5" fill="var(--muted)">흰/노랑/연두/파랑</text>
+    <text x="251" y="61">4후보 토너먼트</text>
+    <text x="251" y="78" font-size="10.5" fill="var(--muted)">재프레이밍 전수 판독</text>
+    <text x="435" y="61">지터 앙상블</text>
+    <text x="435" y="78" font-size="10.5" fill="var(--muted)">±3px · 캡 0.94</text>
+    <text x="609" y="61">조도 정규화</text>
+    <text x="609" y="78" font-size="10.5" fill="var(--muted)">감마 LUT · 캡 0.94</text>
+    <text x="783" y="61">디블러</text>
+    <text x="783" y="78" font-size="10.5" fill="var(--muted)">언샤프 · 캡 0.94</text>
+    <text x="435" y="120" font-size="11" fill="var(--muted)">→ 지터부터는 conf &lt; 0.95 일 때만 발동 (멀쩡한 판은 건드리지 않는다)</text>
+  </g>
+</svg>
+<figcaption>WiseAI 크롭은 여백이 헐렁해 원본만 읽으면 17%가 헛읽음(실측) — 그래서 한 크롭을
+4가지로 재프레이밍해 전부 읽고 "문법 유효 &gt; 신뢰도" 순으로 최고를 뽑는다.
+색-한글 규칙(영업용 한글은 노랑판 전용)이 1차 환각 필터.</figcaption>
+</figure>
+<ul>
+  <li><b>문법 검사</b>: 숫자 2~3 + 한글 1 + 숫자 4 (지역판은 한글2 접두). 무효 텍스트는 어느 관문에도 못 들어간다.</li>
+  <li><b>신뢰도</b> = CTC 비블랭크 스텝 확률의 기하평균. 로그의 <code>conf</code>가 이 값.</li>
+</ul>
+
+<h2><span class="no">3</span>3단 판정 — 오확정 0의 구조</h2>
+<p>오독은 반드시 나온다는 전제로, 오독이 ★FINAL까지 살아나가지 못하게 관문을 겹겹이 세웠다.</p>
+<figure>
+<svg viewBox="0 0 880 300" role="img" aria-label="즉시확정, 챔피언십 투표, 등록차 DB 그물의 3단 게이트와 FINAL/HOLD 출구">
+  <defs><marker id="a3" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="14" y="110" width="120" height="48" rx="8"/>
+    <rect x="196" y="24" width="180" height="56" rx="8"/>
+    <rect x="196" y="110" width="180" height="56" rx="8"/>
+    <rect x="196" y="196" width="180" height="56" rx="8"/>
+    <rect x="470" y="110" width="170" height="56" rx="8"/>
+    <rect x="716" y="52" width="140" height="48" rx="8" stroke="var(--ok)" stroke-width="2.2"/>
+    <rect x="716" y="196" width="140" height="48" rx="8" stroke="var(--muted)" stroke-dasharray="5 4"/>
+    <line x1="134" y1="122" x2="188" y2="58" marker-end="url(#a3)"/>
+    <line x1="134" y1="134" x2="188" y2="134" marker-end="url(#a3)"/>
+    <line x1="376" y1="52" x2="708" y2="70" marker-end="url(#a3)"/>
+    <line x1="376" y1="138" x2="462" y2="138" marker-end="url(#a3)"/>
+    <line x1="640" y1="126" x2="708" y2="90" marker-end="url(#a3)"/>
+    <line x1="640" y1="152" x2="708" y2="206" marker-end="url(#a3)"/>
+    <line x1="286" y1="166" x2="286" y2="190" marker-end="url(#a3)"/>
+    <line x1="376" y1="224" x2="708" y2="224" marker-end="url(#a3)"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="74" y="130">판독 결과</text>
+    <text x="74" y="147" font-size="10.5" fill="var(--muted)">good-shot / 버스트</text>
+    <text x="286" y="46">1단 · 즉시확정</text>
+    <text x="286" y="64" font-size="10.5" fill="var(--muted)">conf ≥ 0.985 &amp; 무반박(0.98+)</text>
+    <text x="286" y="132">2단 · 챔피언십 투표</text>
+    <text x="286" y="150" font-size="10.5" fill="var(--muted)">표수·primary 가중 · 접전캡 0.94</text>
+    <text x="286" y="218">3단 · 등록차 DB 그물</text>
+    <text x="286" y="236" font-size="10.5" fill="var(--muted)">편집거리 ≤1 유일 매칭</text>
+    <text x="555" y="132">게이트 0.95</text>
+    <text x="555" y="150" font-size="10.5" fill="var(--muted)">가공 판독은 캡 0.94 → 단독 불가</text>
+    <text x="786" y="72" fill="var(--ok)" font-weight="700">★ PLATE FINAL</text>
+    <text x="786" y="89" font-size="10.5" fill="var(--muted)">칸 배정 + EV 연쇄</text>
+    <text x="786" y="216" fill="var(--muted)" font-weight="700">? HOLD (침묵)</text>
+    <text x="786" y="233" font-size="10.5" fill="var(--muted)">발급 거부 — 로그만</text>
+    <text x="418" y="106" font-size="10.5" fill="var(--muted)">트랙 만료 시 개표</text>
+    <text x="672" y="110" font-size="10.5" fill="var(--ok)">통과</text>
+    <text x="668" y="192" font-size="10.5" fill="var(--muted)">미달 &amp; DB 매칭 실패</text>
+    <text x="540" y="212" font-size="10.5" fill="var(--muted)">db-rescue: 정확≥0.80 / 1글자≥0.85</text>
+  </g>
+</svg>
+<figcaption>1단이 못 끝내면 투표로, 투표가 게이트(0.95)에 못 미치면 등록차 명부가 회수(db-rescue)나
+교정(db-fix)을 시도한다. 전부 미달이면 확정을 거부하고 침묵(HOLD) — 이것이 오확정 0의 비결.
+등록차 정확일치 conf ≥ 0.97은 단표로도 즉시 확정(db-instant).</figcaption>
+</figure>
+
+<div class="note">
+<b>명부(registered_plates.txt)의 역할은 번호 교정뿐이다.</b> EV 여부의 출처가 아니다 —
+EV는 모든 차가 실조회(§5). 실전의 "아파트 등록차 목록"에 해당하는 정당한 화이트리스트 레이어.
+</div>
+
+<h2><span class="no">4</span>주차 판정 상태기계</h2>
+<p>구역(4점 폴리곤)은 웹 UI 클릭 4번 또는 <code>/parking_roi</code>로 등록하고 카메라에 영속화된다.
+판정은 채널별로 아래 상태기계가 돈다.</p>
+<figure>
+<svg viewBox="0 0 880 270" role="img" aria-label="빈칸, 후보, 주차중, 출차의 상태 전이와 조건">
+  <defs><marker id="a4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="30" y="96" width="130" height="54" rx="27"/>
+    <rect x="270" y="96" width="150" height="54" rx="10"/>
+    <rect x="540" y="96" width="150" height="54" rx="10" stroke="var(--ok)" stroke-width="2.2"/>
+    <rect x="540" y="204" width="150" height="46" rx="10" stroke="var(--warn)" stroke-width="1.8"/>
+    <line x1="160" y1="118" x2="262" y2="118" marker-end="url(#a4)"/>
+    <line x1="420" y1="118" x2="532" y2="118" marker-end="url(#a4)"/>
+    <path d="M 350 150 Q 330 190 262 150" fill="none" marker-end="url(#a4)"/>
+    <line x1="615" y1="150" x2="615" y2="198" marker-end="url(#a4)"/>
+    <path d="M 540 232 Q 95 240 92 156" fill="none" marker-end="url(#a4)"/>
+    <path d="M 615 96 Q 615 40 690 40 Q 760 40 762 92" fill="none" stroke-dasharray="5 4"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="95" y="119">빈 칸</text>
+    <text x="95" y="136" font-size="10.5" fill="var(--muted)">대기</text>
+    <text x="345" y="119">후보</text>
+    <text x="345" y="136" font-size="10.5" fill="var(--muted)">겹침 65% 관측</text>
+    <text x="615" y="119" fill="var(--ok)" font-weight="700">PARKED</text>
+    <text x="615" y="136" font-size="10.5" fill="var(--muted)">점유 기억 · 판독 가동</text>
+    <text x="615" y="231" fill="var(--warn)" font-weight="700">LEFT</text>
+    <text x="211" y="106" font-size="10.5" fill="var(--muted)">차량+겹침 65%</text>
+    <text x="476" y="106" font-size="10.5" fill="var(--muted)">정지 2초 유지</text>
+    <text x="318" y="182" font-size="10.5" fill="var(--muted)">이탈 — 카운트 취소</text>
+    <text x="672" y="176" font-size="10.5" fill="var(--muted)">90% 이탈 → 즉시</text>
+    <text x="672" y="190" font-size="10.5" fill="var(--muted)">부재 지속 → 유예 후</text>
+    <text x="300" y="252" font-size="10.5" fill="var(--muted)">전량 리셋 + 나간 차의 유령 번호판 15초 차단 (새 차는 0초 대기)</text>
+    <text x="700" y="28" font-size="10.5" fill="var(--muted)">번호 확정·EV 갱신 (재확정 없음 — NeedsRead 게이트)</text>
+  </g>
+</svg>
+<figcaption>출차는 2경로: 차가 실제로 나가면(겹침 ≤10%) <b>즉시</b>, WiseAI가 정지차를 놓쳐
+증거가 사라지면 유예(grace) 후. 완결된 칸(점유+번호+EV)은 출차까지 판독 완전 침묵 —
+같은 차가 새 id로 재등장해도 재확정하지 않는다.</figcaption>
+</figure>
+<ul>
+  <li><b>점유 유지</b>: 칸을 덮는 "정지" 차가 보이면 WiseAI id가 바뀌어도 점유 유지 (id 뺑뺑이 흡수).</li>
+  <li><b>판독 게이트</b> <code>NeedsRead</code>: 읽을 일(번호/EV 미확정 칸)이 있을 때만 OCR 가동. 전 칸 완결이면 채널 침묵.</li>
+  <li><b>위반</b> = 점유 ∧ 비EV. EV 미확정(unknown)은 위반으로 치지 않는다 — 억울한 알람 방지.</li>
+</ul>
+
+<h2><span class="no">5</span>전기차 판정 — 전 차량 실조회</h2>
+<figure>
+<svg viewBox="0 0 880 240" role="img" aria-label="FINAL 번호가 popen curl 자식 프로세스로 ev.or.kr을 조회하고 실패 시 DB 플래그로 폴백하는 흐름">
+  <defs><marker id="a5" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="14" y="80" width="140" height="50" rx="8" stroke="var(--ok)" stroke-width="2"/>
+    <rect x="216" y="80" width="170" height="50" rx="8"/>
+    <rect x="450" y="24" width="160" height="50" rx="8" stroke="var(--accent)" stroke-width="2"/>
+    <rect x="450" y="150" width="160" height="50" rx="8" stroke-dasharray="5 4"/>
+    <rect x="686" y="80" width="170" height="50" rx="8"/>
+    <line x1="154" y1="105" x2="208" y2="105" marker-end="url(#a5)"/>
+    <line x1="386" y1="92" x2="442" y2="60" marker-end="url(#a5)"/>
+    <line x1="610" y1="60" x2="742" y2="76" marker-end="url(#a5)"/>
+    <line x1="530" y1="74" x2="530" y2="144" marker-end="url(#a5)" stroke-dasharray="5 4"/>
+    <line x1="610" y1="180" x2="748" y2="134" marker-end="url(#a5)" stroke-dasharray="5 4"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="84" y="101" fill="var(--ok)" font-weight="700">★ FINAL 번호</text>
+    <text x="84" y="118" font-size="10.5" fill="var(--muted)">등록·미등록 무관</text>
+    <text x="301" y="101">EvClient 워커</text>
+    <text x="301" y="118" font-size="10.5" fill="var(--muted)">popen curl 자식 프로세스</text>
+    <text x="530" y="45" fill="var(--accent)" font-weight="700">ev.or.kr 실조회</text>
+    <text x="530" y="62" font-size="10.5" fill="var(--muted)">무공해차 확인 · 1종=EV</text>
+    <text x="530" y="171">DB 플래그 폴백</text>
+    <text x="530" y="188" font-size="10.5" fill="var(--muted)">조회 실패(-1) 시에만</text>
+    <text x="771" y="101">칸 상태 갱신</text>
+    <text x="771" y="118" font-size="10.5" fill="var(--muted)">ev=yes/no → 위반 재계산</text>
+    <text x="414" y="46" font-size="10.5" fill="var(--muted)">HTTPS</text>
+    <text x="498" y="112" font-size="10.5" fill="var(--muted)">실패 시</text>
+  </g>
+</svg>
+<figcaption>앱 프로세스 안에서 OpenSSL TLS를 열면 즉사(실측) — 그래서 조회는 <code>popen curl</code>
+자식 프로세스로 우회한다. 결과는 캐시되고, 판 색은 판정에 쓰지 않는다(법인 전기차는 연두판).</figcaption>
+</figure>
+
+<h2><span class="no">6</span>외부 연동 — notify-then-fetch</h2>
+<p>이벤트 채널(EventStatus)은 펌웨어 제약으로 <b>불리언만</b> 실을 수 있다. 그래서 2채널로 나눴고,
+클라이언트 규칙은 3줄이면 끝난다: <i>"Occupied 라인이 오면 (값 무관) XML을 읽고 violation 필드로 판단하라."</i></p>
+<figure>
+<svg viewBox="0 0 880 260" role="img" aria-label="카메라와 Pi 사이의 벨 푸시와 XML 풀 시퀀스">
+  <defs><marker id="a6" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="currentColor"/></marker></defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="60" y="14" width="150" height="38" rx="8"/>
+    <rect x="660" y="14" width="150" height="38" rx="8"/>
+    <line x1="135" y1="52" x2="135" y2="244" stroke-dasharray="4 4" stroke-width="1"/>
+    <line x1="735" y1="52" x2="735" y2="244" stroke-dasharray="4 4" stroke-width="1"/>
+    <line x1="135" y1="84" x2="727" y2="84" marker-end="url(#a6)"/>
+    <line x1="735" y1="116" x2="143" y2="116" marker-end="url(#a6)"/>
+    <line x1="135" y1="148" x2="727" y2="148" marker-end="url(#a6)"/>
+    <line x1="135" y1="196" x2="727" y2="196" marker-end="url(#a6)" stroke="var(--warn)"/>
+    <line x1="735" y1="228" x2="143" y2="228" marker-end="url(#a6)"/>
+  </g>
+  <g font-size="12.5" fill="currentColor" text-anchor="middle">
+    <text x="135" y="38">카메라 (앱)</text>
+    <text x="735" y="38">Pi / Qt 클라이언트</text>
+    <text x="435" y="76">벨: Occupied.N=True (주차 확정)</text>
+    <text x="435" y="108" fill="var(--muted)" font-size="11.5">GET /parking_status → plate 빈값, ev=unknown</text>
+    <text x="435" y="140">벨: Occupied.N 펄스 False→True (번호·EV 확정)</text>
+    <text x="435" y="171" fill="var(--muted)" font-size="11.5">GET XML → plate=49허5678, ev=no</text>
+    <text x="435" y="188" fill="var(--warn)" font-weight="700">violation=true → 알람 ON</text>
+    <text x="435" y="220" fill="var(--muted)" font-size="11.5">출차: Occupied.N=False → GET XML → 알람 재계산</text>
+  </g>
+</svg>
+<figcaption>내용이 바뀌었는데 불리언 값이 안 변하는 경우(번호 확정 등)는 False→True <b>펄스</b>로
+diff 라인을 강제한다 — 수신측은 값 해석 없이 "라인 수신 = XML 읽기"만 하면 모든 경우가 커버된다.</figcaption>
+</figure>
+
+<h2><span class="no">7</span>실측으로 확정한 교훈들</h2>
+<div class="lesson">
+  <div><b>① 모형 판은 폰트가 전부다 <span class="pill acc">근본 원인</span></b>
+  둥근 범용 폰트 인쇄물은 sharp 2000+로 선명해도 체계 오독(9→0, 서→거).
+  실판 글리프는 강블러·저해상·원근에도 정독. 같은 판에서 conf 0.80→<b>1.00</b>.
+  <small>초점·크롭·후처리를 의심하기 전에 폰트부터.</small></div>
+  <div><b>② 센서 거울상 — 스냅샷의 로고를 봐라</b>
+  판독 전량 헛것이면 원본 스냅샷에서 차 로고 방향부터 확인.
+  로고가 뒤집혀 있으면 센서가 거울상 — <code>kFlipCropH=true</code>.
+  <small>거울상 크롭은 항상 완전 헛것("89?8184"류)을 뱉는다.</small></div>
+  <div><b>③ 가공 판독은 0.94 캡</b>
+  지터·조도·디블러 등 가공본이 오답을 게이트 위로 부스트한 사고 4회 반복.
+  원본 판독만 단독으로 게이트를 넘을 자격이 있다.</div>
+  <div><b>④ 필터 문턱은 실측 분포에서</b>
+  크롭 sharp 하한 600은 실크롭(≈488)까지 죽여 전량 starving.
+  쓰레기(≈300)와 실크롭 사이인 150이 정답 — 분포를 재보고 문턱을 놓을 것.</div>
+  <div><b>⑤ 매니페스트는 app/src가 원본</b>
+  빌드가 app/src → app/bin으로 재생성. 포트 등 수정은 반드시 app/src에.
+  디버거 뷰어는 앱 <code>SkeletonPortNumber</code> 고정(8590) + 뷰어 설정 일치로 연결.</div>
+  <div><b>⑥ 앱 내 TLS 금지 · 설치 수칙</b>
+  앱 프로세스에서 OpenSSL TLS = 즉사 → 외부 HTTPS는 popen curl 자식.
+  cap 설치는 영상 정지 + 물리 재부팅 직후 — 연속 설치는 반쯤-설치 오염.</div>
+</div>
+
+<h2><span class="no">8</span>런타임 튜닝 — 재빌드 없는 실험</h2>
+<p>판정 파라미터 12종은 <code>GET/POST /parking_tune</code>과 웹 UI ⚙️ 패널에서 즉시 조정된다.
+부분 갱신·범위 검증·영속화(재설치에도 유지). 튜닝 사이클: 재빌드+설치 10분 → <b>3초</b>.</p>
+<table>
+<thead><tr><th>키</th><th class="num">기본</th><th>역할</th></tr></thead>
+<tbody>
+<tr><td><code>overlap</code></td><td class="num">0.65</td><td>진입/주차 후보 겹침 문턱</td></tr>
+<tr><td><code>dwell_ms</code></td><td class="num">2000</td><td>정지 유지 → 주차 확정</td></tr>
+<tr><td><code>grace_ms</code></td><td class="num">2000</td><td>부재 유예 (WiseAI 드랍 견딤 — 실제 출차는 cover로 즉시)</td></tr>
+<tr><td><code>exit_cover</code></td><td class="num">0.10</td><td>겹침 이 이하 = 즉시 출차</td></tr>
+<tr><td><code>presence_miss</code></td><td class="num">0</td><td>출차 육안검증 횟수 (0=끔 — 흐린 재크롭 오독의 강제출차 방지)</td></tr>
+<tr><td><code>best_frame_mode</code></td><td class="num">0/1</td><td>챔피언 1장 모드 (다중 차량은 0)</td></tr>
+<tr><td><code>best_min_sharp</code></td><td class="num">150</td><td>크롭 선명도 하한 — 블러 컷</td></tr>
+<tr><td><code>best_min_aspect</code></td><td class="num">2.0</td><td>크롭 가로비 하한 — 로고·배경 오크롭 컷</td></tr>
+</tbody>
+</table>
+<p style="color:var(--muted); font-size:13.5px">외 <code>presence_period_ms</code> · <code>presence_conf</code> · <code>burst_margin</code> · <code>goodshot_grace_ms</code>.</p>
+
+<h2><span class="no">9</span>디버깅 — 무슨 일이 벌어지는지 보는 법</h2>
+<ul>
+  <li><b>원격 디버그 뷰어</b>: <code>./remote_debug_viewer object_detect</code> — 앱 스켈레톤 포트 8590 고정이 전제.</li>
+  <li><b>HTTP</b>: <code>GET /eventlog</code> — 같은 이벤트를 포트 설정 없이 언제나.</li>
+  <li><b>워처</b>: <code>CLI/watch_events.sh</code> — 1초 tail + 판독/FINAL/위반 색 강조.</li>
+</ul>
+<pre>🅿️ PARKED ch0-01 (id619) — 번호판 판독 시작
+  burst ch0 id619 sample#1 "342버6986" (conf 1.00, box 674x203)
+🎨 COLOR ch0 "342버6986" -&gt; white (wh)
+⚡EV ch0 "342버6986" -&gt; ★EV★ (포르쉐코리아 타이칸, 전기, 1종)
+★ PLATE FINAL ch0 id619 -&gt; "342버6986" (conf 1.00, src=burst)   ← db 딱지 없음 = 생판독 정확
+📡 Occupied.1 ch0-01 occupied=1 plate=342버6986 ev=yes viol=0</pre>
+<p style="color:var(--muted); font-size:13.5px">★ FINAL 뒤에 <code>db-fix / db-rescue</code>가 붙으면 명부가 교정한 것,
+없으면 순수 생판독. 실판 글리프 판은 db 딱지 없이 conf 1.00으로 끝난다 — 그게 정상 상태다.</p>
+
+</main>

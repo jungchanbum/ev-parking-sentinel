@@ -125,6 +125,7 @@ SDK_VER=26.05.19 SOC=cv5 APP_NAME=object_detect docker compose up   # → object
 
 | 문서 | 내용 |
 |---|---|
+| [docs/LOGIC_TOUR.html](docs/LOGIC_TOUR.html) | **동작 원리 투어 (다이어그램 6개)** — 파이프라인·크롭 2경로·OCR 내부·3단 판정·상태기계·EV·외부 연동 + 실측 교훈. [PDF 판](docs/LOGIC_TOUR.pdf) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 동작 원리 전해부 — 모듈·판정 상태기계·데이터 흐름 |
 | [docs/PARKING_EVENTS.md](docs/PARKING_EVENTS.md) | 외부 연동 통신 명세 (벨+서류철) |
 | [docs/PI_INTEGRATION.md](docs/PI_INTEGRATION.md) | Raspberry Pi 엔지니어 작업 가이드 (GPIO 3줄 규칙) |
