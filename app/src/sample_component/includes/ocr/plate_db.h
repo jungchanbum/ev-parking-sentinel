@@ -73,26 +73,33 @@ class PlateDb {
   //   (실측: 이미지 재조립·NCC 분류 전부 불안정). 지역의 진실은 명부가 안다 —
   //   "지역명은 고정 DB" 설계. 명부에 [지역2글자]+꼬리 꼴 등록번호가 정확히 하나면
   //   그 번호로 복원. 복수면 애매 → 불개입. 반환: 복원 성공 여부.
-  bool RecoverRegion(const std::string& text, std::string* out) const {
+  // 텍스트 선두가 지역명 꼴(한글2+숫자)인가 — 일반판은 숫자 시작이라 오탐 불가.
+  static bool HasRegionPrefix(const std::string& text) {
+    std::vector<uint32_t> t = Decode(text);
+    return t.size() >= 9 && IsHangul(t[0]) && IsHangul(t[1]) && IsDigit(t[2]);
+  }
+
+  bool RecoverRegion(const std::string& text, std::string* out, int* diff_out = nullptr) const {
     std::vector<uint32_t> t = Decode(text);
     // 선두가 지역명 꼴(한글2+숫자)이면 벗긴다 — 모델이 세로 지역기둥을 엉뚱한
-    //   지역토큰("경기" 등)으로 읽는 실측 케이스. 지역의 진실은 명부가 정한다.
+    //   지역토큰("경기"/"대구" 등)으로 읽는 실측 케이스. 지역의 진실은 명부가 정한다.
     if (t.size() >= 9 && IsHangul(t[0]) && IsHangul(t[1]) && IsDigit(t[2]))
       t.erase(t.begin(), t.begin() + 2);
     if (t.size() < 7 || !IsDigit(t[0])) return false;   // 꼬리(일반형)만 대상
-    int found = 0;
+    int found = 0, best_diff = 3;
     for (size_t i = 0; i < plates_.size(); i++) {
       const auto& p = plates_[i];
       if (p.size() != t.size() + 2) continue;
       if (!IsHangul(p[0]) || !IsHangul(p[1])) continue;  // 선두 지역명 꼴만
-      int diff = 0;                                      // 꼬리 치환 ≤1 허용 (아↔어 실측)
-      for (size_t k = 0; k < t.size() && diff <= 1; k++)
+      int diff = 0;                     // 꼬리 치환 ≤2 (지역기둥이 폭을 뺏어 2글자 오독 실측:
+      for (size_t k = 0; k < t.size() && diff <= 2; k++)  //  3372→3337, 아→어)
         if (p[k + 2] != t[k]) ++diff;
-      if (diff <= 1) {
-        if (found == 0) *out = raw_[i];
+      if (diff <= 2) {
+        if (found == 0) { *out = raw_[i]; best_diff = diff; }
         found++;
       }
     }
+    if (found == 1 && diff_out) *diff_out = best_diff;
     return found == 1;
   }
 

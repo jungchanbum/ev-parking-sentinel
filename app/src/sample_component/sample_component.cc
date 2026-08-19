@@ -2364,16 +2364,25 @@ const char* SampleComponent::ApplyDbLayer(std::string* fin, double fconf, bool* 
     return "";
   }
   if (m == 2) return "";  // 1글자 복수 매칭 — 애매, 불개입
-  // [지역 복원 08-14] 1단(세로 지역명) 택시판 — 모델은 지역 레이아웃 미학습이라
-  //   꼬리만 읽거나(31아3372) 엉뚱한 지역토큰을 붙인다(경기31어3372 실측 0.93).
-  //   RecoverRegion 이 선두 지역토큰을 벗기고 꼬리 치환≤1 로 명부의 지역판과 유일
-  //   대조 — 신뢰 판독은 즉시 교정, 게이트 미달(0.85+)은 rescue 승격 (ed1 그물과 동급).
-  if (plate_db_.RecoverRegion(*fin, &dbtxt)) {
-    if (*trusted) { *fin = dbtxt; return ", db-region"; }
-    if (fconf >= cfg::kDbRescueEd1Min) {
-      *fin = dbtxt;
-      *trusted = true;
-      return ", db-region-rescue";
+  // [지역 복원 08-14/19] 1단(세로 지역명) 택시판 — 모델은 지역 레이아웃 미학습이라
+  //   꼬리만 읽거나(31아3372) 엉뚱한 지역토큰을 붙인다(대구31아3337 실측 0.96).
+  //   RecoverRegion 이 선두 지역토큰을 벗기고 꼬리 치환≤2 로 명부의 지역판과 유일
+  //   대조. 승격 문턱은 오차별 차등: ≤1 은 0.85(ed1 그물 동급), 2 는 0.90(tier-2 동급).
+  {
+    int rdiff = 0;
+    if (plate_db_.RecoverRegion(*fin, &dbtxt, &rdiff)) {
+      if (*trusted) { *fin = dbtxt; return ", db-region"; }
+      if (fconf >= (rdiff <= 1 ? cfg::kDbRescueEd1Min : 0.90)) {
+        *fin = dbtxt;
+        *trusted = true;
+        return ", db-region-rescue";
+      }
+    } else if (PlateDb::HasRegionPrefix(*fin)) {
+      // [미검증 지역 = 확정 금지 08-19] 지역 접두 판독이 명부로 복원되지 않으면 FINAL
+      //   자격 박탈 — 미학습 레이아웃에서 지역토큰은 증거가 아니라 환각이다 (실측:
+      //   "대구31아3337" 0.96 이 그대로 FINAL 돼 위반 오발). 침묵이 원칙.
+      *trusted = false;
+      return ", region-unverified→hold";
     }
   }
   // [tier-2] 1글자 그물 밖 — 2글자 치환 유일 매칭 회수 (저해상 혼동쌍 오독 전용).
