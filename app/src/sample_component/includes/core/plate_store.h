@@ -76,6 +76,22 @@ class PlateStore {
   // 그 채널이 방금 쓴 슬롯 번호 — OCR 이 cap_<slot>.jpg 를 읽어들일 때 사용.
   int last_slot(int ch) const { return (ch >= 0 && ch < cfg::kChannels) ? last_slot_[ch] : -1; }
 
+  // [FINAL 증거 08-13] ★FINAL 에 실제 사용된 이미지 전용 링 (final_<slot>.jpg).
+  //   UI 갤러리·/parking_status evidence 가 이것만 본다 — 과정 크롭 홍수와 분리.
+  //   반환: 저장된 슬롯 (실패 -1).
+  int SaveFinal(const std::string& jpg) {
+    if (jpg.empty()) return -1;
+    int slot = final_total_ % cfg::kFinalRing;
+    char p[64];
+    snprintf(p, sizeof(p), "%s/final_%d.jpg", cfg::kStorageDir, slot);
+    std::ofstream ofs(p, std::ios::binary);
+    if (!ofs) return -1;
+    ofs.write(jpg.data(), jpg.size());
+    final_total_++;
+    return slot;
+  }
+  int final_total() const { return final_total_; }
+
   // [갤러리] 임의 JPEG(버스트/베스트프레임 크롭 등)를 다음 링 슬롯에 저장 — /plate?n= 확인용.
   //   ImageRef 경로와 무관하게 "OCR 에 실제 들어간 크롭"을 눈으로 보게 하는 진단 저장.
   int SaveDebugImage(int ch, const std::string& jpg) {
@@ -187,6 +203,7 @@ class PlateStore {
   long cand_seq_ = 0;                                // [검증] 후보 전역 카운터(cand 파일 idx)
   std::deque<CandRec> cand_log_;                     // [검증] 최근 저장 기록
   int  total_ = 0;                                   // 저장 총 개수(=다음 슬롯 계산)
+  int  final_total_ = 0;                             // [FINAL 증거] final_ 링 저장 수
   int  saved_ch_[cfg::kChannels] = {0, 0, 0, 0};     // 채널별 저장 수(진단)
   int  read_fail_ = 0;                               // 파일 못 읽어 pending 간 횟수(진단)
   // 늦게 써지는 파일 재시도

@@ -247,9 +247,35 @@ void SampleComponent::RecordFinal(int ch, const std::string& text, uint64_t now_
   bool registered = plate_db_ready_ && plate_db_.Match(text, &canon) == 1;
   char m[320];
 
-  // [주차] 증거 크롭 URL (Pi 가 카메라 호스트 앞에 붙여 사용). 방금 저장분 슬롯.
+  // [FINAL 증거 08-13] 이 확정에 "실제 사용된 이미지" 1장을 final_ 링에 저장.
+  //   우선순위: 버스트 승리 크롭(메모리) > 베스트프레임 챔피언 > 디스크 good-shot 슬롯.
+  //   버스트/챔피언은 스냅샷 유래 거울상이라 사람 보기 좋게 뒤집어 저장 (good-shot
+  //   슬롯 파일은 이미 정방향 재저장본). UI 갤러리·evidence URL 은 이 링만 본다.
   char ev_url[80];
-  snprintf(ev_url, sizeof(ev_url), "/opensdk/object_detect/plate?n=%d", plate_store_.last_slot(ch));
+  {
+    std::string fj;
+    cv::Mat src;
+    if (C(ch).last_burst_oid == oid && !C(ch).last_burst_crop.empty())
+      src = C(ch).last_burst_crop;
+    else if (C(ch).best_oid == oid && !C(ch).best_crop.empty())
+      src = C(ch).best_crop;
+    if (!src.empty()) {
+      cv::Mat show = src;
+      if (cfg::kFlipCropH) cv::flip(src, show, 1);
+      std::vector<uchar> jb;
+      if (cv::imencode(".jpg", show, jb)) fj.assign(jb.begin(), jb.end());
+    } else {
+      char p[64];
+      snprintf(p, sizeof(p), "%s/cap_%d.jpg", cfg::kStorageDir, plate_store_.last_slot(ch));
+      std::ifstream ifs(p, std::ios::binary);
+      if (ifs) { std::ostringstream oss; oss << ifs.rdbuf(); fj = oss.str(); }
+    }
+    int fslot = plate_store_.SaveFinal(fj);
+    if (fslot >= 0)
+      snprintf(ev_url, sizeof(ev_url), "/opensdk/object_detect/final?n=%d", fslot);
+    else  // 저장 실패 폴백 — 기존 과정 링이라도 가리킨다
+      snprintf(ev_url, sizeof(ev_url), "/opensdk/object_detect/plate?n=%d", plate_store_.last_slot(ch));
+  }
 
   // [08-11 정정] 명부의 역할 분리 — 명부는 "번호 교정(오독 회수)"만 담당하고,
   //   EV 판정은 등록차든 미등록차든 **항상 ev.or.kr 실조회가 진실**이다. 명부 플래그는
@@ -683,6 +709,8 @@ void SampleComponent::PurgePlateState(int ch) {
   C(ch).best_crop.release();    // [베스트 프레임] 챔피언 리셋 — 다음 차는 백지에서 경연
   C(ch).best_score = 0; C(ch).best_ocr_score = 0; C(ch).best_oid = 0;
   C(ch).best_finalized = false;
+  C(ch).last_burst_crop.release();  // [FINAL 증거] 이전 차 크롭 이월 금지
+  C(ch).last_burst_oid = 0;
   C(ch).purge_ms = NowMs();  // [세션 경계] 이 시각 이전의 저장 크롭은 재판독 금지
   // [계측] 사이클 스탬프 리셋 — 다음 차의 타임라인은 백지에서
   C(ch).tr_entry_ms = C(ch).tr_parked_ms = C(ch).tr_first_read_ms = C(ch).tr_final_ms = 0;
@@ -699,6 +727,8 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
   if (ch < 0 || ch >= cfg::kChannels || slot < 0) return;
   // 이미 즉시확정된 차의 늦은 good-shot(재저장) — 판독 불필요 (이중판정 방지)
   if (C(ch).plate_done.count(plate_store_.last_oid(ch))) return;
+  // [유령 크롭 차단 08-19] 출차한 차의 판 id 가 남긴 슬롯 — 재판독 금지 (오배정 방지)
+  if (C(ch).ghost_plate.count(plate_store_.last_oid(ch))) return;
   // [헛수고 차단] 이 슬롯은 "이미 배정된 번호"로 판명난 크롭 — 재판독해도 얻을 게 없다
   if (slot == C(ch).futile_slot) return;
   // [판독 게이트 — 주차 전용 모드] "읽을 일이 있을 때"만: 후보 진행중 or 번호/EV
@@ -768,18 +798,10 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
     return;
   }
 
-  // [갤러리 방향 통일 08-11] good-shot(ImageRef) 은 PlateStore 가 원본 그대로 저장해
-  //   카메라 센서 거울상이 그대로 보인다. 반면 best-frame 은 flip 보정본을 저장 → 갤러리에
-  //   거울상/정방향이 섞여 헷갈림. 여기서 OCR 입력과 같은 방향(flip 보정본)으로 슬롯을
-  //   덮어써 갤러리를 통일한다. img 자체는 안 건드리므로 아래 Recognize 의 판독은 불변.
-  if (cfg::kFlipCropH) {
-    cv::Mat show; cv::flip(img, show, 1);
-    std::vector<uchar> jb;
-    if (cv::imencode(".jpg", show, jb)) {
-      std::ofstream ofs(path, std::ios::binary);
-      if (ofs) ofs.write(reinterpret_cast<const char*>(jb.data()), jb.size());
-    }
-  }
+  // [08-19 제거] "갤러리 방향 통일" 재저장 삭제 — 재판독이 같은 슬롯을 다시 읽을 때마다
+  //   또 뒤집어(정방향↔거울 교대) 판독이 "42노4989"↔"89가4584"로 진동하고, JPEG 재압축로
+  //   sharp 가 매회 갉리는(2177→2169 실측) 자기파괴 버그였다. 슬롯 파일은 카메라 원본
+  //   (거울상) 그대로 두고, 사람 눈용 정방향은 FINAL 전용 갤러리(final_)가 담당한다.
 
   char m0[144];
   snprintf(m0, sizeof(m0), "[good-shot] OCR ch%d #%d crop=%dx%d sharp %.0f (load %.1fms)",
@@ -858,6 +880,10 @@ void SampleComponent::RecognizePlate(int ch, int slot) {
         if (plate_db_.Match(fin, &dbtxt) == 1 && dbtxt != fin) {
           fin = dbtxt;
           dbtag = ", db-fix";
+        } else if (plate_db_.RecoverRegion(fin, &dbtxt)) {
+          // [지역 복원] 1단 택시판 — 꼬리만 읽힘 → 명부의 지역판 완성번호로 승격
+          fin = dbtxt;
+          dbtag = ", db-region";
         }
       }
       C(ch).last_final = fin;
@@ -945,6 +971,16 @@ void SampleComponent::RegisterURI() {
       IAppDispatcher::OpenAPIRegistrar(String("/plate"), GetInstanceName(), methods);
   SendNoReplyEvent("AppDispatcher",
                    static_cast<int32_t>(IAppDispatcher::EEventType::eRegisterCommand), 0, pl1);
+
+  // [FINAL 증거] /finallist (개수), /final?n=N — ★FINAL 에 실제 사용된 이미지 전용
+  auto* fl = new ("OpenAPI")
+      IAppDispatcher::OpenAPIRegistrar(String("/finallist"), GetInstanceName(), methods);
+  SendNoReplyEvent("AppDispatcher",
+                   static_cast<int32_t>(IAppDispatcher::EEventType::eRegisterCommand), 0, fl);
+  auto* fn = new ("OpenAPI")
+      IAppDispatcher::OpenAPIRegistrar(String("/final"), GetInstanceName(), methods);
+  SendNoReplyEvent("AppDispatcher",
+                   static_cast<int32_t>(IAppDispatcher::EEventType::eRegisterCommand), 0, fn);
 
   // [진단] /sysinfo — 앱이 실제 쓸 수 있는 CPU 코어 수 (스레드 설계용)
   auto* sinfo = new ("OpenAPI")
@@ -1198,6 +1234,25 @@ bool SampleComponent::HandleHttpRequest(Event* event) {
       if (!d.empty()) { oas->SetStatusCode(200); oas->SetResponseBody(d, OpenAppResponseType::FILE); }
       else { oas->SetStatusCode(404); oas->SetResponseBody("empty"); }
     } else { oas->SetStatusCode(404); oas->SetResponseBody("no cap"); }
+  } else if (path == "/final") {
+    // [FINAL 증거] ★FINAL 에 실제 사용된 이미지: ../storage/final_<n>.jpg
+    int n = 0;
+    std::string qs = oas->GetFCGXParam("QUERY_STRING").c_str();
+    size_t p = qs.find("n="); if (p != std::string::npos) n = atoi(qs.c_str() + p + 2);
+    char fp[64]; snprintf(fp, sizeof(fp), "%s/final_%d.jpg", cfg::kStorageDir, n);
+    std::ifstream ifs(fp, std::ios::binary);
+    if (ifs) {
+      std::ostringstream oss; oss << ifs.rdbuf();
+      std::string d = oss.str();
+      if (!d.empty()) { oas->SetStatusCode(200); oas->SetResponseBody(d, OpenAppResponseType::FILE); }
+      else { oas->SetStatusCode(404); oas->SetResponseBody("empty"); }
+    } else { oas->SetStatusCode(404); oas->SetResponseBody("no final"); }
+  } else if (path == "/finallist") {
+    // [FINAL 증거] 링 현황 — UI 갤러리가 이것만 폴링 (과정 크롭과 분리)
+    std::string body = "{\"total\":" + std::to_string(plate_store_.final_total()) +
+                       ",\"ring\":" + std::to_string(cfg::kFinalRing) + "}";
+    oas->AddResponseHeader("Content-type", "application/json");
+    oas->SetResponseBody(body.c_str(), body.size());
   } else if (path == "/imgref") {
     // [진단] 카메라가 준 번호판 크롭(ImageRef) 파일을 여러 후보 경로로 읽어보고, 읽히면 저장
     int ch = 0;
@@ -1539,8 +1594,39 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
   PlateOcrResult br = plate_ocr_.Recognize(crop, /*light=*/true);
   // 스냅샷-bbox 시간 어긋남 시 tinyLPR 이 conf 0.5~0.85 짜리 "환각 번호판"을 지어냄(실측).
   // 진짜 판독은 0.93+ 로 관측 → 0.90 미만은 전부 버린다.
-  if (br.text.empty() || br.confidence < 0.90) return;
-  plate_vote_.Add(ch, oid, br.text, br.confidence, /*primary=*/false);
+  if (br.text.empty()) return;
+  std::string vote_txt = br.text;
+  bool db_assist = false;
+  bool ok = br.confidence >= 0.90;
+  // [명부 낀 구제 08-14] 0.85~0.89 경계 판독이라도 명부와 유일 근사매칭(≤2글자)이면
+  //   교정 텍스트로 표 인정 — 경계 품질 크롭에서 판독이 20초씩 굶던 것 해소.
+  //   변형 오독들("42노4991"/"42노4996")이 같은 교정 텍스트로 수렴해 2표 합의가 빨라진다.
+  //   미등록 번호는 이 문을 열 수 없다 (기존 0.90 게이트 그대로).
+  if (!ok && br.confidence >= cfg::kBurstDbAssistMin && plate_db_ready_) {
+    std::string dbtxt;
+    if (plate_db_.MatchLoose(br.text, &dbtxt) == 1) {
+      vote_txt = dbtxt;
+      db_assist = true;
+      ok = true;
+    }
+  }
+  if (!ok) {
+    // [가시화 08-14] 게이트 미달 판독을 3초 스로틀로 노출 — "read starving" 동안
+    //   무슨 일이 있는지 보이게 (예전엔 조용히 버려져 원인 추적이 장님이었음).
+    if (br.confidence >= 0.60 && now_ms - C(ch).burst_rej_ms >= 3000) {
+      C(ch).burst_rej_ms = now_ms;
+      char rj[160];
+      snprintf(rj, sizeof(rj), "%s  burst reject ch%d id%ld \"%s\" (conf %.2f < 0.90, box %dx%d)%s",
+               Hl(cfg::kAnsiDim), ch, oid, br.text.c_str(), br.confidence,
+               x1 - x0, y1 - y0, Hl(cfg::kAnsiReset));
+      EmitEvent(ch, rj);
+    }
+    return;
+  }
+  plate_vote_.Add(ch, oid, vote_txt, br.confidence, /*primary=*/false);
+  // [FINAL 증거 08-13] 표를 낸 크롭 보관 — 버스트가 이기면 이게 "실제 사용 이미지".
+  C(ch).last_burst_crop = crop.clone();
+  C(ch).last_burst_oid = oid;
 
   // [스태킹] 유효 샘플(=판을 제대로 프레이밍한 크롭)만 고정 캔버스에 합산 누적.
   //   크기 정규화는 스트레치 리사이즈 — 마진이 bbox 비례라 프레임 간 정렬이 유지된다.
@@ -1557,10 +1643,16 @@ void SampleComponent::BurstSample(int ch, long oid, float l, float t, float r, f
     a.sum += f;
     a.n++;
   }
-  char m[224];
-  snprintf(m, sizeof(m), "%s  burst ch%d id%ld sample#%d \"%s\" (conf %.2f, box %dx%d, %.1fms)%s",
-           Hl(cfg::kAnsiDim), ch, oid, plate_vote_.Count(ch, oid), br.text.c_str(), br.confidence,
-           x1 - x0, y1 - y0, br.total_ms, Hl(cfg::kAnsiReset));
+  char m[240];
+  if (db_assist)
+    snprintf(m, sizeof(m),
+             "%s  burst ch%d id%ld sample#%d \"%s\" (conf %.2f, db≈\"%s\", box %dx%d, %.1fms)%s",
+             Hl(cfg::kAnsiDim), ch, oid, plate_vote_.Count(ch, oid), vote_txt.c_str(),
+             br.confidence, br.text.c_str(), x1 - x0, y1 - y0, br.total_ms, Hl(cfg::kAnsiReset));
+  else
+    snprintf(m, sizeof(m), "%s  burst ch%d id%ld sample#%d \"%s\" (conf %.2f, box %dx%d, %.1fms)%s",
+             Hl(cfg::kAnsiDim), ch, oid, plate_vote_.Count(ch, oid), vote_txt.c_str(), br.confidence,
+             x1 - x0, y1 - y0, br.total_ms, Hl(cfg::kAnsiReset));
   EmitEvent(ch, m);
 }
 
@@ -2064,7 +2156,12 @@ void SampleComponent::ProcessObjects(int ch, const std::string& xml) {
 
     // ★ 저장: 카메라 크롭(ImageRef)이 새로 오면 PlateStore 가 읽어 저장(알림 문자열 반환).
     //   [주차 전용 모드] 읽을 일이 있을 때만 저장·판독 — 평시엔 갤러리도 안 쌓는다 (B안).
-    if (park_read) {
+    //   [유령 크롭 차단 08-19] 출차한 차의 번호판 id(유령 명부 15초)의 ImageRef 는
+    //   저장·판독 금지 — WiseAI 가 차 교체를 못 알아채고 트랙 id 를 유지하면 best-shot
+    //   이 "이전 차의 판 사진"이라, 새 차 칸에 옛 번호가 1.00 으로 꽂힌다 (실측:
+    //   132도8271 출차 → 49허5678 진입 → id95653 낡은 크롭으로 132도8271 오배정).
+    //   버스트는 라이브 스냅샷을 직접 잘라 낡을 수 없음 — 새 차는 버스트가 읽는다.
+    if (park_read && !C(ch).ghost_plate.count(p.id)) {
       std::string sev = plate_store_.Save(ch, p.imgref, now_ms);
       if (!sev.empty()) {
         EmitEvent(ch, sev);
@@ -2267,6 +2364,18 @@ const char* SampleComponent::ApplyDbLayer(std::string* fin, double fconf, bool* 
     return "";
   }
   if (m == 2) return "";  // 1글자 복수 매칭 — 애매, 불개입
+  // [지역 복원 08-14] 1단(세로 지역명) 택시판 — 모델은 지역 레이아웃 미학습이라
+  //   꼬리만 읽거나(31아3372) 엉뚱한 지역토큰을 붙인다(경기31어3372 실측 0.93).
+  //   RecoverRegion 이 선두 지역토큰을 벗기고 꼬리 치환≤1 로 명부의 지역판과 유일
+  //   대조 — 신뢰 판독은 즉시 교정, 게이트 미달(0.85+)은 rescue 승격 (ed1 그물과 동급).
+  if (plate_db_.RecoverRegion(*fin, &dbtxt)) {
+    if (*trusted) { *fin = dbtxt; return ", db-region"; }
+    if (fconf >= cfg::kDbRescueEd1Min) {
+      *fin = dbtxt;
+      *trusted = true;
+      return ", db-region-rescue";
+    }
+  }
   // [tier-2] 1글자 그물 밖 — 2글자 치환 유일 매칭 회수 (저해상 혼동쌍 오독 전용).
   //   사람 눈이 문맥으로 복원하듯, 등록차 목록이 모델의 문맥이 된다 (08-06 도입).
   if (plate_db_.MatchLoose(*fin, &dbtxt) == 1 && fconf >= 0.90) {

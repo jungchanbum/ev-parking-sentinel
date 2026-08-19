@@ -3,177 +3,154 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>object_detect · Live Detection</title>
+<title>object_detect — 주차 관제</title>
 <style>
   :root{
-    --bg:#0a0e17; --panel:#121826; --line:#1f2a3d; --txt:#e6edf7; --dim:#7c8aa5;
-    --accent:#22d3ee; --move:#ff3b5c; --ok:#31e281;
+    --bg:#101315; --panel:#16191c; --line:#262b30; --txt:#dce1e5; --dim:#848d94;
+    --amber:#d9a13c; --red:#e05561; --green:#3fbf7f; --steel:#6b93b8;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#16203a 0%,var(--bg) 60%);
-       color:var(--txt);font-family:"Segoe UI",system-ui,-apple-system,sans-serif}
-  .wrap{max-width:1000px;margin:0 auto;padding:18px}
-  header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-  header .logo{width:38px;height:38px;border-radius:10px;
-    background:linear-gradient(135deg,var(--accent),#6366f1);display:grid;place-items:center;
-    font-size:20px;box-shadow:0 0 24px rgba(34,211,238,.45)}
-  header h1{font-size:19px;margin:0;letter-spacing:.3px}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font-family:"Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;font-size:14px}
+  .wrap{max-width:1000px;margin:0 auto;padding:20px 18px 40px}
+  code,.mono{font-family:Consolas,"D2Coding",monospace}
+
+  header{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);
+    padding-bottom:12px;margin-bottom:14px}
+  header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.04em}
   header .sub{color:var(--dim);font-size:12px}
-  .pills{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-  .pill{padding:8px 16px;border-radius:999px;border:1px solid var(--line);background:var(--panel);
-    color:var(--dim);cursor:pointer;font-weight:600;font-size:13px;transition:.15s}
-  .pill:hover{border-color:var(--accent);color:var(--txt)}
-  .pill.on{background:linear-gradient(135deg,var(--accent),#6366f1);color:#04121a;border-color:transparent;
-    box-shadow:0 0 18px rgba(34,211,238,.4)}
-  .stage{position:relative;width:100%;aspect-ratio:16/9;background:
-      linear-gradient(0deg,#080b12,#0d1420);border:1px solid var(--line);border-radius:14px;
-      overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.5)}
+
+  .tabs{display:flex;gap:2px;margin:0 0 10px}
+  .tab{padding:7px 18px;border:1px solid var(--line);border-bottom-width:2px;background:var(--panel);
+    color:var(--dim);cursor:pointer;font-weight:700;font-size:13px;border-radius:3px 3px 0 0}
+  .tab.on{color:var(--txt);border-bottom-color:var(--amber)}
+
+  .stage{position:relative;width:100%;aspect-ratio:16/9;background:#0b0d0f;
+    border:1px solid var(--line);border-radius:3px;overflow:hidden}
   .stage img,.stage canvas{position:absolute;inset:0;width:100%;height:100%}
-  .stage img{object-fit:contain;background:#05080e}
+  .stage img{object-fit:contain;background:#0b0d0f}
   .stage .novideo{position:absolute;inset:0;display:grid;place-items:center;color:var(--dim);
     font-size:13px;text-align:center;padding:20px;pointer-events:none}
-  .hud{position:absolute;top:10px;left:10px;display:flex;gap:8px;z-index:3}
-  .chip{background:rgba(6,12,22,.72);border:1px solid var(--line);border-radius:8px;
-    padding:6px 10px;font-size:12px;font-weight:700;backdrop-filter:blur(6px)}
-  .chip .n{color:var(--accent)}
-  .chip .m{color:var(--move)}
-  .chip .live{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);
-    margin-right:6px;box-shadow:0 0 8px var(--ok);animation:blink 1.1s infinite}
-  @keyframes blink{50%{opacity:.25}}
-  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .hud{position:absolute;top:8px;left:8px;display:flex;gap:6px;z-index:3}
+  .chip{background:rgba(11,13,15,.85);border:1px solid var(--line);border-radius:3px;
+    padding:4px 9px;font-size:12px}
+  .chip .mono{font-weight:700}
+  .chip .n{color:var(--amber)} .chip .m{color:var(--red)}
+  .chip .live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);
+    margin-right:6px;vertical-align:1px}
+
+  .legend{display:flex;gap:16px;margin-top:8px;color:var(--dim);font-size:12px;flex-wrap:wrap}
+  .legend b{display:inline-block;width:20px;height:0;border-top:3px solid;vertical-align:middle;margin-right:6px}
+
+  .sect{margin-top:22px;border-top:1px solid var(--line);padding-top:10px}
+  .sect > .hd{display:flex;gap:10px;align-items:center;margin-bottom:8px}
+  .sect > .hd label{font-size:12px;color:var(--dim);letter-spacing:.08em;font-weight:700}
+  .sect .hint{color:var(--dim);font-size:12px}
+
+  button.bt{padding:6px 14px;border:1px solid var(--line);background:var(--panel);color:var(--txt);
+    cursor:pointer;font-weight:700;font-size:12.5px;border-radius:3px}
+  button.bt:hover{border-color:var(--dim)}
+  button.bt.on{background:var(--amber);border-color:var(--amber);color:#141210}
+  button.bt.off{color:var(--dim);text-decoration:line-through}
+  button.bt.danger:hover{border-color:var(--red);color:var(--red)}
+
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   .row input{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--line);
-    color:var(--txt);border-radius:8px;padding:9px 11px;font-size:12px}
-  .row label{color:var(--dim);font-size:12px}
-  .toggles{gap:8px}
-  .tg{padding:8px 16px;border-radius:999px;border:1px solid var(--line);background:var(--panel);
-    color:var(--dim);cursor:pointer;font-weight:700;font-size:13px;transition:.15s}
-  .tg.on{background:linear-gradient(135deg,var(--ok),#22c55e);color:#04121a;border-color:transparent;
-    box-shadow:0 0 14px rgba(49,226,129,.35)}
-  .tg.off{opacity:.55;text-decoration:line-through}
-  .legend{display:flex;gap:16px;margin-top:10px;color:var(--dim);font-size:12px}
-  .legend b{display:inline-block;width:22px;height:0;border-top:3px solid;vertical-align:middle;margin-right:6px}
-  .foot{color:var(--dim);font-size:11px;margin-top:14px;line-height:1.6}
-  /* 번호판 버스트 팝업 */
-  .modal{position:fixed;inset:0;background:rgba(3,6,12,.82);backdrop-filter:blur(4px);
-    display:none;place-items:center;z-index:50;padding:20px}
-  .modal.show{display:grid}
-  .modalBox{background:var(--panel);border:1px solid var(--line);border-radius:16px;
-    max-width:920px;width:100%;padding:18px;box-shadow:0 24px 80px rgba(0,0,0,.6)}
-  .modalHead{display:flex;justify-content:space-between;align-items:center;font-size:15px;
-    font-weight:700;margin-bottom:14px}
-  .modalHead b{color:var(--accent)}
-  .bmClose{background:none;border:1px solid var(--line);color:var(--dim);border-radius:8px;
-    width:32px;height:32px;cursor:pointer;font-size:15px}
-  .bmClose:hover{color:var(--txt);border-color:var(--move)}
-  .bmGrid{max-height:64vh;overflow-y:auto}
-  /* 최적 원본 + 보정본 크게 */
-  .bmHero{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:14px;margin-bottom:14px;
-    border:1px solid var(--ok);border-radius:12px;background:rgba(49,226,129,.06)}
-  .bmHeroCol{flex:1;min-width:180px}
-  .bmHeroTag{font-size:11px;font-weight:800;margin-bottom:6px}
-  .bmHeroTag.best{color:var(--ok)} .bmHeroTag.enh{color:var(--accent)}
-  .bmHeroCol img{width:100%;max-height:180px;object-fit:contain;background:#05080e;border-radius:8px;
-    border:1px solid var(--line)}
-  .bmHeroInfo{color:var(--dim);font-size:12px;line-height:1.7;min-width:90px}
-  .bmHeroInfo b{color:var(--ok);font-size:16px}
-  /* 전체 후보 썸네일 */
-  .bmThumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px}
-  .bmCard{border:2px solid var(--line);border-radius:10px;overflow:hidden;background:#05080e;
-    position:relative}
-  .bmCard.best{border-color:var(--ok);box-shadow:0 0 16px rgba(49,226,129,.45)}
-  .bmCard.worst{border-color:var(--move);box-shadow:0 0 16px rgba(255,59,92,.4)}
-  .bmCard.bad{opacity:.5}
-  .bmCard img{width:100%;height:70px;object-fit:contain;background:#05080e;display:block}
-  .bmMeta{padding:6px 8px;font-size:10px;line-height:1.4;color:var(--dim)}
-  .bmMeta .sc{color:var(--txt);font-weight:700;font-size:11px}
-  .bmTag{position:absolute;top:5px;font-size:9px;font-weight:800;padding:2px 6px;border-radius:5px}
-  .bmTag.num{left:5px;background:rgba(6,12,22,.8);color:var(--accent);border:1px solid var(--line)}
-  .bmTag.best{right:5px;background:var(--ok);color:#04121a}
-  .bmTag.rank{right:5px;background:rgba(34,211,238,.85);color:#04121a}
-  .bmTag.worst{right:5px;background:var(--move);color:#fff}
-  .bmTag.bad{right:5px;background:rgba(255,59,92,.5);color:#fff}
-  .bmFoot{color:var(--dim);font-size:11px;margin-top:14px;line-height:1.6}
+    color:var(--txt);border-radius:3px;padding:8px 10px;font-size:12px}
+
+  #tuneGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
+  #tuneGrid .fld div{font-size:12px;color:var(--dim);margin-bottom:3px}
+  #tuneGrid input{width:100%;background:var(--panel);border:1px solid var(--line);color:var(--txt);
+    border-radius:3px;padding:7px 9px;font-size:12.5px;font-family:Consolas,monospace}
+
+  #gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}
+  #gallery figure{margin:0;border:1px solid var(--line);border-radius:3px;background:#0b0d0f;overflow:hidden}
+  #gallery img{width:100%;height:72px;object-fit:contain;display:block;cursor:pointer}
+  #gallery figcaption{font-size:10.5px;color:var(--dim);padding:3px 6px;border-top:1px solid var(--line)}
+
+  .foot{color:var(--dim);font-size:11.5px;margin-top:22px;line-height:1.7;border-top:1px solid var(--line);padding-top:10px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div class="logo">🎯</div>
-    <div>
-      <h1>object_detect · Live Detection</h1>
-      <div class="sub">채널별 실시간 스트리밍 + 움직임 감지 오버레이</div>
-    </div>
+    <h1>object_detect</h1>
+    <div class="sub">엣지 주차 관제 — 번호판 인식 · EV 판정 · 위반 감시</div>
   </header>
 
-  <div class="pills" id="pills"></div>
+  <div class="tabs" id="pills"></div>
 
   <div class="stage">
     <img id="cam" alt="" referrerpolicy="no-referrer"/>
     <div class="novideo" id="novideo">영상 없음 — 아래 스냅샷 URL을 카메라에 맞게 조정하세요.<br>(감지 박스는 영상 없이도 표시됩니다)</div>
     <canvas id="ov"></canvas>
     <div class="hud">
-      <div class="chip"><span class="live"></span>CH <span class="n" id="chNum">0</span></div>
-      <div class="chip">감지 <span class="n" id="cntAll">0</span></div>
-      <div class="chip">움직임 <span class="m" id="cntMove">0</span></div>
+      <div class="chip"><span class="live"></span>CH <span class="n mono" id="chNum">0</span></div>
+      <div class="chip">감지 <span class="n mono" id="cntAll">0</span></div>
+      <div class="chip">움직임 <span class="m mono" id="cntMove">0</span></div>
     </div>
   </div>
 
   <div class="legend">
-    <span><b style="border-color:#ff3b5c"></b>움직이는 객체(빨강)</span>
-    <span><b style="border-color:#31e281"></b>번호판(초록)</span>
-    <span style="color:#7c8aa5">· 정지 객체는 안 뜸</span>
+    <span><b style="border-color:var(--red)"></b>움직이는 객체</span>
+    <span><b style="border-color:var(--green)"></b>번호판</span>
+    <span>· 정지 객체는 표시하지 않음</span>
   </div>
 
-  <div class="row toggles">
-    <label>감지 대상</label>
-    <button type="button" class="tg on" id="tgPerson">🚶 사람</button>
-    <button type="button" class="tg on" id="tgVehicle">🚗 차량</button>
-    <label style="margin-left:14px">라이브</label>
-    <button type="button" class="tg on" id="tgStream">📹 스트리밍</button>
-  </div>
-
-  <div class="row toggles">
-    <label>🅿️ 주차구역</label>
-    <button type="button" class="tg" id="tgZone">✏️ 구역 그리기</button>
-    <button type="button" class="tg" id="btnZoneClear">🗑 이 채널 비우기</button>
-    <span id="zoneHint" style="color:var(--dim);font-size:12px"></span>
-  </div>
-
-  <div class="legend">
-    <span><b style="border-color:#22d3ee"></b>빈 구역</span>
-    <span><b style="border-color:#f5c542"></b>주차중</span>
-    <span><b style="border-color:#ff3b5c"></b>위반(비EV)</span>
-    <span style="color:#7c8aa5">· 영상 위 4번 클릭 = 구역 등록</span>
-  </div>
-
-  <!-- ⚙️ 판정 튜닝: /parking_tune 런타임 파라미터 (빌드·재설치 없이 즉시 적용) -->
-  <div class="row" style="flex-direction:column;align-items:stretch">
-    <div style="display:flex;gap:12px;align-items:center">
-      <label>⚙️ 판정 튜닝</label>
-      <button type="button" class="tg" id="tuneRefresh">↻ 현재값</button>
-      <button type="button" class="tg on" id="tuneApply">✔ 적용</button>
-      <span id="tuneMsg" style="color:var(--dim);font-size:12px"></span>
+  <div class="sect">
+    <div class="hd">
+      <label>감지 대상</label>
+      <button type="button" class="bt on" id="tgPerson">사람</button>
+      <button type="button" class="bt on" id="tgVehicle">차량</button>
+      <label style="margin-left:14px">라이브</label>
+      <button type="button" class="bt on" id="tgStream">스트리밍</button>
     </div>
-    <div id="tuneGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin-top:10px"></div>
   </div>
 
-  <div class="row">
-    <label>스냅샷 URL</label>
-    <input id="snap" value=""/>
-  </div>
-
-  <div class="row" style="flex-direction:column;align-items:stretch">
-    <div style="display:flex;gap:12px;align-items:center">
-      <label>저장된 번호판 (검증)</label>
-      <button type="button" class="tg on" id="galRefresh">↻ 새로고침</button>
-      <span id="galCount" style="color:var(--dim);font-size:12px"></span>
+  <div class="sect">
+    <div class="hd">
+      <label>주차구역</label>
+      <button type="button" class="bt" id="tgZone">구역 그리기</button>
+      <button type="button" class="bt danger" id="btnZoneClear">이 채널 비우기</button>
+      <span id="zoneHint" class="hint"></span>
     </div>
-    <div id="gallery" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px;margin-top:10px"></div>
+    <div class="legend">
+      <span><b style="border-color:var(--steel)"></b>빈 구역</span>
+      <span><b style="border-color:var(--amber)"></b>주차중</span>
+      <span><b style="border-color:var(--red)"></b>위반 (비EV)</span>
+      <span>· 영상 위 4번 클릭 = 구역 등록</span>
+    </div>
+  </div>
+
+  <!-- 판정 튜닝: /parking_tune 런타임 파라미터 (빌드·재설치 없이 즉시 적용) -->
+  <div class="sect">
+    <div class="hd">
+      <label>판정 튜닝</label>
+      <button type="button" class="bt" id="tuneRefresh">현재값</button>
+      <button type="button" class="bt on" id="tuneApply">적용</button>
+      <span id="tuneMsg" class="hint"></span>
+    </div>
+    <div id="tuneGrid"></div>
+  </div>
+
+  <div class="sect">
+    <div class="hd"><label>스냅샷 URL</label></div>
+    <div class="row"><input id="snap" value=""/></div>
+  </div>
+
+  <div class="sect">
+    <div class="hd">
+      <label>확정 증거 (FINAL 에 사용된 이미지)</label>
+      <button type="button" class="bt" id="galRefresh">새로고침</button>
+      <span id="galCount" class="hint"></span>
+    </div>
+    <div id="gallery"></div>
   </div>
 
   <div class="foot">
     · 영상: 앱이 카메라 내부 스냅샷을 <code>/snapshot?ch=N</code>으로 제공.<br>
-    · 번호판 저장: 감지되는 동안 <b>제일 선명하고 큰 순간</b>의 크롭을 <code>storage/plate_last.jpg</code>로 저장. <code>/lastplate</code>로 확인.
+    · 갤러리: ★FINAL 확정에 <b>실제 사용된 이미지만</b> 저장·표시 (<code>/final?n=N</code>).
+      과정 크롭 전체는 진단용 <code>/plate?n=N</code>에 남는다.
   </div>
 </div>
 
@@ -197,9 +174,9 @@
   const pills = document.getElementById('pills');
   CHANNELS.forEach(c=>{
     const b = document.createElement('div');
-    b.className = 'pill' + (c===ch?' on':'');
+    b.className = 'tab' + (c===ch?' on':'');
     b.textContent = 'CH ' + c;
-    b.onclick = ()=>{ ch=c; document.querySelectorAll('.pill').forEach((p,i)=>p.classList.toggle('on',CHANNELS[i]===ch));
+    b.onclick = ()=>{ ch=c; document.querySelectorAll('.tab').forEach((p,i)=>p.classList.toggle('on',CHANNELS[i]===ch));
       document.getElementById('chNum').textContent=ch; };
     pills.appendChild(b);
   });
@@ -215,7 +192,7 @@
     tgStream.classList.toggle('on', streamOn);
     tgStream.classList.toggle('off', !streamOn);
     if(!streamOn){ cam.removeAttribute('src'); novideo.style.display='grid';
-      novideo.innerHTML='스트리밍 OFF (부하↓) · 번호판 감지 시 서버가 자동 캡처합니다.<br>감지 박스는 계속 표시됩니다.'; }
+      novideo.innerHTML='스트리밍 정지 (부하 절감) — 번호판 감지 시 서버가 자동 캡처합니다.<br>감지 박스는 계속 표시됩니다.'; }
     else { loadSnapshot(); }
   };
 
@@ -224,18 +201,18 @@
   const MIN_GAP = 90;  // 프레임 사이 최소 간격(ms)
 
   function loadSnapshot(){
-    if(!active() || !streamOn){ setTimeout(loadSnapshot, 500); return; }  // 안 볼 때/스트리밍 OFF면 쉬기만
+    if(!active() || !streamOn){ setTimeout(loadSnapshot, 500); return; }
     const raw = snap.value.replace('{ch}', ch);
     const url = raw + (raw.includes('?') ? '&' : '?') + 't=' + Date.now();
     const t0 = Date.now();
-    const pre = new Image();          // 안 보이는 버퍼에 먼저 받기
+    const pre = new Image();
     pre.decoding = 'async';
     pre.onload = ()=>{
-      cam.src = pre.src;              // 다 받은 프레임 → 즉시 표시
+      cam.src = pre.src;
       novideo.style.display = 'none';
       setTimeout(loadSnapshot, Math.max(0, MIN_GAP - (Date.now() - t0)));
     };
-    pre.onerror = ()=>{              // 실패(주로 워밍업 503) → 잠깐 뒤 재시도
+    pre.onerror = ()=>{
       novideo.style.display = 'grid';
       setTimeout(loadSnapshot, 800);
     };
@@ -264,7 +241,7 @@
 
   // ---- 감지 박스 폴링 + 그리기 ----
   async function poll(){
-    if(!active()){ setTimeout(poll, 500); return; }  // 안 볼 때는 감지 요청도 정지
+    if(!active()){ setTimeout(poll, 500); return; }
     try{
       const res = await fetch(`${base_uri}/detections?ch=${ch}`, {cache:'no-store'});
       const data = await res.json();
@@ -273,87 +250,83 @@
     setTimeout(poll, 150);
   }
 
+  const C_RED = '#e05561', C_GREEN = '#3fbf7f', C_AMBER = '#d9a13c', C_STEEL = '#6b93b8';
+
   function draw(objs){
     const W = ov.clientWidth, H = ov.clientHeight;
     ov.width = W; ov.height = H;
     ctx.clearRect(0,0,W,H);
-    drawZones(W,H);      // 🅿️ 주차구역 오버레이 (감지 없어도 항상 그림)
-    drawPending(W,H);    // 그리는 중인 클릭 점
+    drawZones(W,H);
+    drawPending(W,H);
     if(!objs){ return; }
     let moving=0, plates=0;
     objs.forEach(o=>{
       const x=o.box[0]*W, y=o.box[1]*H, w=(o.box[2]-o.box[0])*W, h=(o.box[3]-o.box[1])*H;
       const pl=o.plate, mv=o.moving;
       if(pl) plates++; else if(mv) moving++;
-      // 번호판=초록, 움직이는 객체=빨강
-      const col = pl ? '#31e281' : '#ff3b5c';
-      ctx.lineWidth = pl?2:3;
+      const col = pl ? C_GREEN : C_RED;
+      ctx.lineWidth = 2;
       ctx.strokeStyle = col;
-      ctx.shadowColor = col;
-      ctx.shadowBlur = pl?10:18;
       ctx.strokeRect(x,y,w,h);
-      ctx.shadowBlur = 0;
-      // 라벨
-      const label = pl ? '🔖 번호판' : ('▶ MOVING id'+o.id);
-      ctx.font = '600 12px Segoe UI, sans-serif';
+      const label = pl ? '번호판' : ('이동 id'+o.id);
+      ctx.font = '600 12px "Malgun Gothic", sans-serif';
       const tw = ctx.measureText(label).width + 12;
-      ctx.fillStyle = pl ? 'rgba(49,226,129,.92)' : 'rgba(255,59,92,.92)';
-      ctx.fillRect(x, y-20<0?y:y-20, tw, 18);
-      ctx.fillStyle = '#04121a';
-      ctx.fillText(label, x+6, (y-20<0?y:y-20)+13);
+      ctx.fillStyle = pl ? C_GREEN : C_RED;
+      ctx.fillRect(x, y-19<0?y:y-19, tw, 17);
+      ctx.fillStyle = '#101315';
+      ctx.fillText(label, x+6, (y-19<0?y:y-19)+12.5);
     });
     document.getElementById('cntAll').textContent = objs.length;
     document.getElementById('cntMove').textContent = moving;
   }
 
-  // ---- 저장된 번호판 갤러리 (검증용, 누적) — "새것만 받기" ----
+  // ---- 확정 증거 갤러리 — ★FINAL 에 실제 사용된 이미지만 (/finallist, /final) ----
   const gallery = document.getElementById('gallery');
   const galCount = document.getElementById('galCount');
-  const IMGCSS = 'width:100%;height:72px;object-fit:contain;background:#05080e;border:1px solid var(--line);border-radius:6px;cursor:pointer;transform:scaleX(-1)'; // 거울상 → CSS로 뒤집기
   let lastTotal = -1;
 
-  function addThumb(slot, label){
+  function addThumb(slot, seq){
+    const fig = document.createElement('figure');
     const img = document.createElement('img');
-    img.src = `${base_uri}/plate?n=${slot}&t=${slot}_${Date.now()}`;
-    img.title = label;
-    img.style.cssText = IMGCSS;
+    img.src = `${base_uri}/final?n=${slot}&t=${slot}_${Date.now()}`;
     img.onclick = ()=> window.open(img.src, '_blank');
-    gallery.insertBefore(img, gallery.firstChild);  // 최신을 앞에
+    const cap = document.createElement('figcaption');
+    cap.textContent = `FINAL #${seq}`;
+    fig.appendChild(img); fig.appendChild(cap);
+    gallery.insertBefore(fig, gallery.firstChild);  // 최신을 앞에
   }
 
   async function loadGallery(force){
     try{
-      const r = await fetch(`${base_uri}/platelist`, {cache:'no-store'});
+      const r = await fetch(`${base_uri}/finallist`, {cache:'no-store'});
       const d = await r.json();
-      const ring = d.ring || 100;
-      if(d.total === lastTotal && !force) return;   // 개수 안 늘면 아무것도 안 받음
+      const ring = d.ring || 24;
+      if(d.total === lastTotal && !force) return;
 
-      if(force || lastTotal < 0){   // 처음/강제: 전체 다시 그림
+      if(force || lastTotal < 0){
         gallery.innerHTML = '';
         const shown = Math.min(d.total, ring);
-        for(let i=shown-1;i>=0;i--){  // 오래된→최신 순으로 insertBefore = 최신이 앞
-          const slot = (((d.total-1-i)%ring)+ring)%ring;
-          addThumb(slot, `#${d.total-i}`);
+        for(let i=shown-1;i>=0;i--){
+          const idx = d.total-1-i;
+          addThumb(((idx%ring)+ring)%ring, idx+1);
         }
-      } else if(d.total > lastTotal){  // 늘어난 만큼만 새로 추가
+      } else if(d.total > lastTotal){
         const add = Math.min(d.total - lastTotal, ring);
         for(let k=0;k<add;k++){
-          const idx = d.total - add + k;           // lastTotal .. total-1
-          const slot = (((idx)%ring)+ring)%ring;
-          addThumb(slot, `#${idx+1}`);
+          const idx = d.total - add + k;
+          addThumb(((idx%ring)+ring)%ring, idx+1);
         }
-        // 순환버퍼 초과분(오래된 썸네일) 정리
         while(gallery.children.length > ring) gallery.removeChild(gallery.lastChild);
       }
       lastTotal = d.total;
-      galCount.textContent = `총 ${d.total}장 저장 (최근 ${Math.min(d.total,ring)}장) · 봄${d.plates_seen} 크롭${d.imgref_seen} 실패${d.read_fail}`;
+      galCount.textContent = `확정 ${d.total}건 (최근 ${Math.min(d.total,ring)}장 보관)`;
     }catch(e){}
   }
   document.getElementById('galRefresh').onclick = ()=> loadGallery(true);
   setInterval(()=>{ if(active()) loadGallery(false); }, 4000);
   loadGallery(true);
 
-  // ==== ⚙️ 판정 튜닝: GET/POST /parking_tune (즉시 적용·영속화) ====
+  // ==== 판정 튜닝: GET/POST /parking_tune (즉시 적용·영속화) ====
   const TUNE_FIELDS = [
     ['overlap',            '겹침 문턱',        '0.30~0.95 · 65%가 기본'],
     ['dwell_ms',           '주차 확정 대기 ms', '정지 유지 시간 (2000)'],
@@ -372,8 +345,9 @@
   const tuneMsg = document.getElementById('tuneMsg');
   for(const [k, name, hint] of TUNE_FIELDS){
     const d = document.createElement('div');
-    d.innerHTML = `<div style="font-size:12px;color:var(--dim);margin-bottom:3px" title="${hint}">${name}</div>`+
-                  `<input id="tune_${k}" style="width:100%" title="${hint}"/>`;
+    d.className = 'fld';
+    d.innerHTML = `<div title="${hint}">${name}</div>`+
+                  `<input id="tune_${k}" title="${hint}"/>`;
     tuneGrid.appendChild(d);
   }
   async function loadTune(){
@@ -401,19 +375,19 @@
         const el = document.getElementById(`tune_${k}`);
         if(el && j[k] !== undefined) el.value = j[k];
       }
-      tuneMsg.textContent = `적용됨 ✔ (범위 밖 값은 무시됨) ${new Date().toLocaleTimeString()}`;
+      tuneMsg.textContent = `적용됨 (범위 밖 값은 무시) ${new Date().toLocaleTimeString()}`;
     }catch(e){ tuneMsg.textContent = '적용 실패 (네트워크)'; }
   }
   document.getElementById('tuneRefresh').onclick = loadTune;
   document.getElementById('tuneApply').onclick = applyTune;
   loadTune();
 
-  // ==== 🅿️ 주차구역: 오버레이 표시 + 클릭 4점으로 등록 ====
+  // ==== 주차구역: 오버레이 표시 + 클릭 4점으로 등록 ====
   //   캔버스는 detection 박스와 같은 판정(거울상) 좌표계 → 여기서 그린/찍은 좌표가
   //   차 박스와 그대로 정렬된다. 등록 POST 는 ?noflip=1 (이미 판정좌표계라 반전 불필요).
-  let zones = [];        // 현재 채널 구역 상태 (/parking_status)
-  let drawZone = false;  // 구역 그리기 모드
-  let drawPts = [];      // 그리는 중인 클릭 점(0~1)
+  let zones = [];
+  let drawZone = false;
+  let drawPts = [];
 
   const tgZone = document.getElementById('tgZone');
   const zoneHint = document.getElementById('zoneHint');
@@ -481,34 +455,33 @@
     zones.forEach(z=>{
       if(!z.poly || z.poly.length < 3) return;
       let stroke, fill;
-      if(z.violation){ stroke='#ff3b5c'; fill='rgba(255,59,92,.20)'; }
-      else if(z.occupied){ stroke='#f5c542'; fill='rgba(245,197,66,.14)'; }
-      else { stroke='#22d3ee'; fill='rgba(34,211,238,.08)'; }
+      if(z.violation){ stroke=C_RED; fill='rgba(224,85,97,.18)'; }
+      else if(z.occupied){ stroke=C_AMBER; fill='rgba(217,161,60,.14)'; }
+      else { stroke=C_STEEL; fill='rgba(107,147,184,.08)'; }
       ctx.beginPath();
       z.poly.forEach((p,i)=>{ const X=p.x*W, Y=p.y*H; i?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });
       ctx.closePath();
       ctx.setLineDash(z.occupied ? [] : [6,5]);
-      ctx.lineWidth=2; ctx.strokeStyle=stroke; ctx.shadowColor=stroke; ctx.shadowBlur=8;
+      ctx.lineWidth=2; ctx.strokeStyle=stroke;
       ctx.fillStyle=fill; ctx.fill(); ctx.stroke();
-      ctx.setLineDash([]); ctx.shadowBlur=0;
-      // 라벨
+      ctx.setLineDash([]);
       let lab = z.id;
-      if(z.violation)      lab += ' ⛔위반 ' + z.plate;
+      if(z.violation)      lab += ' 위반 ' + z.plate;
       else if(z.occupied)  lab += (z.plate ? (' '+z.plate) : ' 주차중')
-                                + (z.ev==='yes'?' ✅EV':(z.ev==='no'?' ⛔':' ⏳'));
+                                + (z.ev==='yes'?' EV':(z.ev==='no'?' 비EV':' 확인중'));
       else                 lab += ' 빈자리';
       const X=z.poly[0].x*W, Y=z.poly[0].y*H;
-      ctx.font='700 12px Segoe UI, sans-serif';
+      ctx.font='700 12px "Malgun Gothic", sans-serif';
       const tw=ctx.measureText(lab).width+12;
-      const ly = Y-20<0?Y:Y-20;
-      ctx.fillStyle='rgba(6,12,22,.82)'; ctx.fillRect(X, ly, tw, 18);
-      ctx.fillStyle=stroke; ctx.fillText(lab, X+6, ly+13);
+      const ly = Y-19<0?Y:Y-19;
+      ctx.fillStyle='rgba(11,13,15,.85)'; ctx.fillRect(X, ly, tw, 17);
+      ctx.fillStyle=stroke; ctx.fillText(lab, X+6, ly+12.5);
     });
   }
 
   function drawPending(W,H){
     if(drawPts.length===0) return;
-    ctx.strokeStyle='#22d3ee'; ctx.fillStyle='#22d3ee'; ctx.lineWidth=2;
+    ctx.strokeStyle=C_STEEL; ctx.fillStyle=C_STEEL; ctx.lineWidth=2;
     ctx.setLineDash([5,4]);
     ctx.beginPath();
     drawPts.forEach((p,i)=>{ const X=p.x*W,Y=p.y*H; i?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });

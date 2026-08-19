@@ -68,6 +68,34 @@ class PlateDb {
     return r;
   }
 
+  // [지역 복원 08-14] 꼬리(숫자시작 일반형) 판독 → 명부의 지역판 완성번호로 승격.
+  //   1단(세로 지역명) 택시판은 모델이 지역 레이아웃을 학습 못 해 꼬리만 읽힌다
+  //   (실측: 이미지 재조립·NCC 분류 전부 불안정). 지역의 진실은 명부가 안다 —
+  //   "지역명은 고정 DB" 설계. 명부에 [지역2글자]+꼬리 꼴 등록번호가 정확히 하나면
+  //   그 번호로 복원. 복수면 애매 → 불개입. 반환: 복원 성공 여부.
+  bool RecoverRegion(const std::string& text, std::string* out) const {
+    std::vector<uint32_t> t = Decode(text);
+    // 선두가 지역명 꼴(한글2+숫자)이면 벗긴다 — 모델이 세로 지역기둥을 엉뚱한
+    //   지역토큰("경기" 등)으로 읽는 실측 케이스. 지역의 진실은 명부가 정한다.
+    if (t.size() >= 9 && IsHangul(t[0]) && IsHangul(t[1]) && IsDigit(t[2]))
+      t.erase(t.begin(), t.begin() + 2);
+    if (t.size() < 7 || !IsDigit(t[0])) return false;   // 꼬리(일반형)만 대상
+    int found = 0;
+    for (size_t i = 0; i < plates_.size(); i++) {
+      const auto& p = plates_[i];
+      if (p.size() != t.size() + 2) continue;
+      if (!IsHangul(p[0]) || !IsHangul(p[1])) continue;  // 선두 지역명 꼴만
+      int diff = 0;                                      // 꼬리 치환 ≤1 허용 (아↔어 실측)
+      for (size_t k = 0; k < t.size() && diff <= 1; k++)
+        if (p[k + 2] != t[k]) ++diff;
+      if (diff <= 1) {
+        if (found == 0) *out = raw_[i];
+        found++;
+      }
+    }
+    return found == 1;
+  }
+
   // [tier-2: 2글자 회수] 같은 길이에서 치환 ≤2 인 등록 번호가 정확히 하나면 그 번호.
   //   저해상 리그의 표준 오독이 혼동쌍(0↔9, 5↔6, 1↔7, 허↔머) 2글자 패턴 (08-06 실측:
   //   90머5755→96머5715, 40허5578→49허5678 — 전부 ed2 라 tier-1 그물 밖이었음).

@@ -97,6 +97,12 @@ class SampleComponent : public Component, public ISampleComponent {
     double best_ocr_score = 0;            // 마지막 OCR 한 챔피언 점수 (동일 크롭 재OCR 방지)
     long best_oid = 0;                    // 그 크롭의 번호판 oid
     bool best_finalized = false;          // 이 세션 챔피언 OCR 완료(확정) 여부
+    // [FINAL 증거 08-13] 마지막으로 표를 낸 버스트 크롭 — FINAL 순간 "실제 사용된
+    //   이미지"로 final_ 링에 저장 (버스트 승리 시 디스크에 크롭이 없어서 보관).
+    cv::Mat last_burst_crop;
+    long last_burst_oid = 0;
+    // [가시화 08-14] 게이트 미달 버스트 판독 로그 스로틀 — "왜 안 읽히나"가 보이게
+    uint64_t burst_rej_ms = 0;
     // [헛수고 차단] 이 슬롯의 크롭은 "이미 배정된 번호"로 판명 — 재판독 금지 (08-05)
     int futile_slot = -1;
     // [유령 명부] 출차한 차의 번호판 id → 출차 시각 — 얼어붙은 반복 레코드가

@@ -15,6 +15,9 @@ constexpr int kChannels = 4;
 
 // 저장 번호판 크롭 순환버퍼 칸 수 (cap_0.jpg ~ cap_99.jpg)
 constexpr int kRingSize = 100;
+// [FINAL 증거 갤러리 08-13] ★FINAL 에 실제 사용된 이미지 전용 링 (final_<n>.jpg).
+//   내부 링(cap_)은 OCR 입력용 전량 저장이고, UI 갤러리·evidence URL 은 이것만 본다.
+constexpr int kFinalRing = 24;
 
 // 카메라가 준 ImageRef 경로(/download/...)를 앱에서 읽을 때 붙이는 접두사.
 //   ImageRef "/download/ch0/objectid_..jpg" → 실제 "/tmp/download/ch0/objectid_..jpg"
@@ -70,6 +73,13 @@ constexpr int kMinOcrCropHeight = 44;   // 08-12 완화: 멀리/작은 토이판
 // good-shot 블러 하한 (라플라시안 분산). good-shot 척도: 정상 100~366·물렁 10~13.
 //   이 미만은 최종 OCR 스킵 — 심한 블러가 환각 번호를 뱉는 것 차단 (08-11 사용자 요청).
 constexpr double kGoodshotMinSharp = 40.0;
+
+// [명부 낀 버스트 구제 08-14] 버스트 환각 게이트(0.90) 미달이어도, 이 값 이상이면서
+//   판독 텍스트가 명부와 "유일" 근사매칭(≤2글자)이면 교정 텍스트로 표를 인정한다.
+//   근거 실측: 경계 품질 크롭(201×48, color ?)에서 "42노499X" conf 0.85~0.89 가 20초간
+//   전량 폐기돼 FINAL 이 22.5초 걸림 — 명부가 문맥이 되면 2~3초면 끝날 판이었다.
+//   미등록 번호엔 영향 0 (기존 0.90 게이트 그대로).
+constexpr double kBurstDbAssistMin = 0.85;
 
 // 크롭 좌우 반전 보정: true 면 판독 직전 크롭을 수평으로 뒤집는다.
 //   근본 원인은 카메라(채널/센서 플립)지만, 카메라에서 못 끄는 경우의 코드 보정.
